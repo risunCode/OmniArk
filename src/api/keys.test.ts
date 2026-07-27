@@ -19,7 +19,6 @@ describe("managed API key policies", () => {
       modelAllowlist: ["allowed-model"],
       dailyTokenLimit: 100,
       monthlyTokenLimit: 200,
-      totalHitLimit: 2,
     }).returning({ id: apiKeys.id });
     createdId = created!.id;
   });

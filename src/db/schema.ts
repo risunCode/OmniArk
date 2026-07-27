@@ -134,7 +134,7 @@ export const filterRules = sqliteTable("filter_rules", {
 export const proxyPool = sqliteTable("proxy_pool", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   url: text("url").notNull(),
-  type: text("type").notNull().default("http"), // http | socks5
+  type: text("type").notNull().default("http"), // http | vercel | cloudflare
   label: text("label"),
   status: text("status").notNull().default("active"), // active | disabled | error
   lastUsedAt: integer("last_used_at", { mode: "timestamp" }),

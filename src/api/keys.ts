@@ -22,7 +22,6 @@ interface KeyPolicyInput {
   modelAllowlist?: unknown;
   dailyTokenLimit?: unknown;
   monthlyTokenLimit?: unknown;
-  totalHitLimit?: unknown;
   expiresAt?: unknown;
 }
 
@@ -32,7 +31,6 @@ interface KeyPolicyValues {
   modelAllowlist: string[];
   dailyTokenLimit: number | null;
   monthlyTokenLimit: number | null;
-  totalHitLimit: number | null;
   expiresAt: Date | null;
 }
 
@@ -91,7 +89,6 @@ function parseKeyPolicy(body: KeyPolicyInput, requireName: boolean, fallback?: K
     modelAllowlist: body.modelAllowlist === undefined ? fallback?.modelAllowlist || [] : parseAllowlist(body.modelAllowlist),
     dailyTokenLimit: body.dailyTokenLimit === undefined ? fallback?.dailyTokenLimit || null : parseLimit(body.dailyTokenLimit, "Daily token limit"),
     monthlyTokenLimit: body.monthlyTokenLimit === undefined ? fallback?.monthlyTokenLimit || null : parseLimit(body.monthlyTokenLimit, "Monthly token limit"),
-    totalHitLimit: body.totalHitLimit === undefined ? fallback?.totalHitLimit || null : parseLimit(body.totalHitLimit, "Total hit limit"),
     expiresAt: body.expiresAt === undefined ? fallback?.expiresAt || null : parseExpiration(body.expiresAt),
   };
 }
@@ -129,8 +126,6 @@ function serializeKey(key: ApiKey, usage: { dailyTokens: number; monthlyTokens: 
     modelAllowlist: getApiKeyModelAllowlist(key),
     dailyTokenLimit: key.dailyTokenLimit,
     monthlyTokenLimit: key.monthlyTokenLimit,
-    totalHitLimit: key.totalHitLimit,
-    totalHits: key.totalHits,
     expiresAt: key.expiresAt,
     lastUsedAt: key.lastUsedAt,
     createdAt: key.createdAt,
@@ -167,7 +162,6 @@ export async function checkApiKeyPolicy(principal: ApiKeyPrincipal, model?: stri
   if (!principal.policy) return null;
   const policy = principal.policy;
   if (policy.expiresAt && policy.expiresAt.getTime() <= Date.now()) return { message: "API key has expired", status: 403 };
-  if (policy.totalHitLimit && policy.totalHits >= policy.totalHitLimit) return { message: "API key total hit limit has been reached", status: 429 };
   const modelAllowlist = getApiKeyModelAllowlist(policy);
   if (model && modelAllowlist.length > 0 && !modelAllowlist.includes(model)) {
     return { message: `API key is not allowed to use model '${model}'`, status: 403 };
@@ -182,7 +176,7 @@ export async function recordApiKeySuccess(principal: ApiKeyPrincipal, totalToken
   if (!principal.id) return;
   const periods = getUsagePeriods();
   const tokens = Math.max(0, Math.floor(totalTokens));
-  await db.update(apiKeys).set({ totalHits: sql`${apiKeys.totalHits} + 1`, lastUsedAt: new Date(), updatedAt: new Date() }).where(eq(apiKeys.id, principal.id));
+  await db.update(apiKeys).set({ lastUsedAt: new Date(), updatedAt: new Date() }).where(eq(apiKeys.id, principal.id));
   for (const period of [periods.day, periods.month]) {
     await db.run(sql`
       INSERT INTO api_key_usage (api_key_id, period, tokens) VALUES (${principal.id}, ${period}, ${tokens})
@@ -242,7 +236,6 @@ keysRouter.post("/custom", async (c) => {
       modelAllowlist: values.modelAllowlist,
       dailyTokenLimit: values.dailyTokenLimit,
       monthlyTokenLimit: values.monthlyTokenLimit,
-      totalHitLimit: values.totalHitLimit,
       expiresAt: values.expiresAt,
     }).returning();
     return c.json({ data: serializeKey(created!, { dailyTokens: 0, monthlyTokens: 0 }), key }, 201);
@@ -263,7 +256,6 @@ keysRouter.patch("/custom/:id", async (c) => {
       modelAllowlist: getApiKeyModelAllowlist(existing),
       dailyTokenLimit: existing.dailyTokenLimit,
       monthlyTokenLimit: existing.monthlyTokenLimit,
-      totalHitLimit: existing.totalHitLimit,
       expiresAt: existing.expiresAt,
     });
     await db.update(apiKeys).set({
@@ -271,7 +263,6 @@ keysRouter.patch("/custom/:id", async (c) => {
       modelAllowlist: values.modelAllowlist,
       dailyTokenLimit: values.dailyTokenLimit,
       monthlyTokenLimit: values.monthlyTokenLimit,
-      totalHitLimit: values.totalHitLimit,
       expiresAt: values.expiresAt,
       updatedAt: new Date(),
     }).where(eq(apiKeys.id, id));

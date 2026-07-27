@@ -362,7 +362,7 @@ export default function TokenUsage({
                 </div>
                 <div className="h-2 rounded-full bg-[var(--secondary)] overflow-hidden">
                   <div
-                    className="h-full rounded-full transition-all"
+                    className="h-full rounded-full transition-[width] duration-500 ease-out"
                     style={{
                       width: `${(Number(model.tokens || 0) / maxTokens) * 100}%`,
                       backgroundColor: model.color,

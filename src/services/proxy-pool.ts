@@ -5,7 +5,7 @@ import { eq, sql, inArray } from "drizzle-orm";
 interface CachedProxy {
   id: number;
   url: string;
-  type: string;
+  type: "http" | "vercel" | "cloudflare";
 }
 
 // ── Proxy list cache ────────────────────────────────────────────────
@@ -24,7 +24,7 @@ async function refreshCache(): Promise<CachedProxy[]> {
     .from(proxyPool)
     .where(eq(proxyPool.status, "active"));
 
-  cachedProxies = rows;
+  cachedProxies = rows.filter((row): row is CachedProxy => row.type === "http" || row.type === "vercel" || row.type === "cloudflare");
   cacheTimestamp = now;
   return cachedProxies;
 }
@@ -87,12 +87,12 @@ let sequentialIndex = 0;
  * @param purpose - What the proxy will be used for: `"model"` (upstream API
  *   calls) or `"auth"` (login automation). If the pool's usage setting
  *   doesn't include this purpose, returns `null`.
- * @param type - Optional protocol filter (`"http"` or `"socks5"`).
+ * @param type - Optional transport filter.
  */
 export async function getNextProxy(
   purpose: "model" | "auth" = "model",
-  type?: "http" | "socks5",
-): Promise<{ id: number; url: string } | null> {
+  type?: "http" | "vercel" | "cloudflare",
+): Promise<{ id: number; url: string; type: CachedProxy["type"] } | null> {
   const cfg = await getProxyPoolSettings();
 
   // Check if proxy pool is enabled for this purpose
@@ -123,7 +123,7 @@ export async function getNextProxy(
     .set({ lastUsedAt: new Date() })
     .where(eq(proxyPool.id, proxy.id));
 
-  return { id: proxy.id, url: proxy.url };
+  return { id: proxy.id, url: proxy.url, type: proxy.type };
 }
 
 /**
@@ -157,7 +157,8 @@ export async function markProxyFail(id: number, error?: string) {
 }
 
 // ── Health check ────────────────────────────────────────────────────
-export async function checkProxyHealth(proxyUrl: string): Promise<{ ok: boolean; latencyMs: number; error?: string; ip?: string }> {
+export async function checkProxyHealth(proxyUrl: string, type: CachedProxy["type"] = "http"): Promise<{ ok: boolean; latencyMs: number; error?: string; ip?: string }> {
+  if (type === "vercel" || type === "cloudflare") return checkRelayHealth(proxyUrl);
   const start = Date.now();
   try {
     const proc = Bun.spawn(
@@ -180,5 +181,27 @@ export async function checkProxyHealth(proxyUrl: string): Promise<{ ok: boolean;
     return { ok: false, latencyMs, error: `HTTP ${statusCode}` };
   } catch (err) {
     return { ok: false, latencyMs: Date.now() - start, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function checkRelayHealth(relayUrl: string): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+  const start = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(relayUrl, {
+      headers: {
+        "x-relay-target": "https://httpbin.org",
+        "x-relay-path": "/get",
+      },
+      signal: controller.signal,
+    });
+    const latencyMs = Date.now() - start;
+    if (response.ok) return { ok: true, latencyMs };
+    return { ok: false, latencyMs, error: `HTTP ${response.status}` };
+  } catch (err) {
+    return { ok: false, latencyMs: Date.now() - start, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
   }
 }

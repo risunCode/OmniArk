@@ -1,19 +1,15 @@
 import StatsCards from "@/components/dashboard/StatsCards";
-import TokenUsage from "@/components/dashboard/TokenUsage";
+import ApiKey from "@/pages/ApiKey";
 import { useEffect, useRef, useState } from "react";
-import { fetchDashboardStats, fetchModelUsage } from "@/lib/api";
-import { modelColor } from "@/lib/utils";
+import { fetchDashboardStats } from "@/lib/api";
 import { useWsEvent } from "@/hooks/useWebSocket";
+import { Sparkles, Wifi } from "lucide-react";
 
 export default function Dashboard() {
   const [stats, setStats] = useState<any>(null);
-  const [modelStats, setModelStats] = useState<any[]>([]);
 
   async function load() {
-    await Promise.all([
-      fetchDashboardStats(undefined, "all").then(setStats).catch(() => setStats(null)),
-      fetchModelUsage(undefined, "all").then((res: { data: any[] }) => setModelStats(res.data || [])).catch(() => setModelStats([])),
-    ]);
+    await fetchDashboardStats(undefined, "all").then(setStats).catch(() => setStats(null));
   }
 
   const reloadRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -54,37 +50,20 @@ export default function Dashboard() {
     totalTokens: Number(stats?.tokens?.total || 0),
   };
 
-  const tokenStats = {
-    total: Number(stats?.tokens?.total || 0),
-    prompt: Number(stats?.tokens?.prompt || 0),
-    completion: Number(stats?.tokens?.completion || 0),
-    credits: Number(stats?.tokens?.credits || 0),
-  };
-
-  const modelUsage = modelStats.filter((m) => Number(m.totalTokens || 0) > 0 || Number(m.credits || 0) > 0).slice(0, 8).map((m, idx) => ({
-    provider: m.provider || "unknown",
-    model: m.model || "unknown",
-    tokens: Number(m.totalTokens || 0),
-    promptTokens: Number(m.promptTokens || 0),
-    completionTokens: Number(m.completionTokens || 0),
-    credits: Number(m.credits || 0),
-    requests: Number(m.totalRequests || 0),
-    creditSource: m.creditSource || "estimated",
-    color: modelColor(`${m.provider || "unknown"}/${m.model || "unknown"}`, idx),
-  }));
-
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-[var(--foreground)]">Dashboard</h1>
-        <p className="text-sm text-[var(--muted-foreground)] mt-1">
-          Overview of your proxy pool status
-        </p>
+      <div className="os-hero">
+        <div className="relative z-10 max-w-2xl">
+          <span className="os-kicker"><Sparkles className="h-3 w-3" aria-hidden="true" /> OmniArk Control</span>
+          <h1 className="mt-4 text-3xl font-bold text-[var(--foreground)] sm:text-4xl">Your proxy command center.</h1>
+          <p className="mt-3 max-w-xl text-sm leading-6 text-[var(--muted-foreground)]">Manage secured access, provider capacity, and live traffic from one calm, focused workspace.</p>
+        </div>
+        <div className="relative z-10 mt-5 flex items-center gap-2 text-xs text-[var(--muted-foreground)]"><span className="relative flex h-2.5 w-2.5"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--info)] opacity-65" /><span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-[var(--info)]" /></span><Wifi className="h-3.5 w-3.5" aria-hidden="true" /> Live pool telemetry</div>
       </div>
 
       <StatsCards data={dashboardStats} />
 
-      <TokenUsage stats={tokenStats} modelUsage={modelUsage} />
+       <ApiKey embedded />
     </div>
   );
 }

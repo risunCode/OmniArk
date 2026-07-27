@@ -4,15 +4,15 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--ring)] disabled:pointer-events-none disabled:opacity-50 cursor-pointer",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-semibold transition-[transform,background-color,border-color,box-shadow,color] duration-200 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--background)] disabled:pointer-events-none disabled:opacity-50 active:scale-[0.97] cursor-pointer",
   {
     variants: {
       variant: {
-        default: "bg-[var(--primary)] text-[var(--primary-foreground)] hover:bg-[var(--primary)]/90",
-        destructive: "bg-[var(--destructive)] text-[var(--destructive-foreground)] hover:bg-[var(--destructive)]/90",
-        outline: "border border-[var(--border)] bg-transparent hover:bg-[var(--secondary)] text-[var(--foreground)]",
-        secondary: "bg-[var(--secondary)] text-[var(--secondary-foreground)] hover:bg-[var(--secondary)]/80",
-        ghost: "hover:bg-[var(--secondary)] text-[var(--foreground)]",
+        default: "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-[0_10px_24px_-12px_var(--primary)] hover:-translate-y-px hover:bg-[var(--accent)] hover:shadow-[0_16px_30px_-13px_var(--primary)]",
+        destructive: "bg-[var(--destructive)] text-[var(--destructive-foreground)] hover:-translate-y-px hover:brightness-110",
+        outline: "border border-[var(--glass-border)] bg-[var(--glass-bg)] text-[var(--foreground)] backdrop-blur-xl hover:-translate-y-px hover:border-[var(--glass-border-strong)] hover:bg-[var(--glass-hover)]",
+        secondary: "bg-[var(--secondary)] text-[var(--secondary-foreground)] hover:-translate-y-px hover:bg-[var(--glass-hover)]",
+        ghost: "text-[var(--foreground)] hover:bg-[var(--glass-hover)]",
         link: "text-[var(--primary)] underline-offset-4 hover:underline",
       },
       size: {

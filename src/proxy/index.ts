@@ -80,7 +80,7 @@ let requestCounter = 0;
 
 export async function recordRequest(entry: NewRequestLog) {
   try {
-    await db.insert(requestLogs).values(entry);
+    const [created] = await db.insert(requestLogs).values(entry).returning();
     void upsertUsageSummary({
       provider: entry.provider || "unknown",
       model: entry.model || "unknown",
@@ -96,10 +96,17 @@ export async function recordRequest(entry: NewRequestLog) {
     if (++requestCounter % 10 === 0) void pruneRequestLogs();
     broadcast({
       type: "request_log",
-      data: { ...entry, email: entry.accountEmail, createdAt: new Date().toISOString() },
+      data: {
+        ...entry,
+        id: created?.id,
+        email: entry.accountEmail,
+        createdAt: created?.createdAt?.toISOString?.() || new Date().toISOString(),
+      },
     });
+    return created;
   } catch (err) {
     console.error("[Proxy] Failed to record request:", err);
+    return undefined;
   }
 }
 

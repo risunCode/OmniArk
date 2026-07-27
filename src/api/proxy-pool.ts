@@ -1,21 +1,11 @@
 import { Hono } from "hono";
 import { db } from "../db/index";
 import { proxyPool } from "../db/schema";
-import { eq, desc, sql, inArray } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import {
-  getNextProxy,
-  markProxySuccess,
-  markProxyFail,
   checkProxyHealth,
   invalidateProxyCache,
 } from "../services/proxy-pool";
-import {
-  scrapeProxies,
-  verifyProxies,
-  COUNTRIES,
-  type ScrapeSource,
-  type ScrapeProtocol,
-} from "../services/proxy-scraper";
 
 export const proxyPoolRouter = new Hono();
 
@@ -33,25 +23,34 @@ proxyPoolRouter.get("/pool", async (c) => {
 });
 
 proxyPoolRouter.post("/pool", async (c) => {
-  const body = await c.req.json<{ proxies: string[] }>();
+  const body = await c.req.json<{ proxies: string[]; type?: "http" | "vercel" | "cloudflare" }>();
   if (!Array.isArray(body.proxies) || body.proxies.length === 0) {
     return c.json({ error: "proxies must be a non-empty array of URLs" }, 400);
   }
 
+  const type = body.type === "vercel" || body.type === "cloudflare" ? body.type : "http";
+  const invalid: string[] = [];
   let added = 0;
   for (const url of body.proxies) {
     const trimmed = url.trim();
     if (!trimmed) continue;
 
-    const type = trimmed.startsWith("socks5://") ? "socks5" : "http";
-    const label = new URL(trimmed).hostname || trimmed;
+    let label: string;
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("Unsupported URL protocol");
+      label = parsed.hostname || trimmed;
+    } catch {
+      invalid.push(trimmed);
+      continue;
+    }
 
     await db.insert(proxyPool).values({ url: trimmed, type, label });
     added++;
   }
 
   invalidateProxyCache();
-  return c.json({ added });
+  return c.json({ added, invalid });
 });
 
 proxyPoolRouter.put("/pool/:id", async (c) => {
@@ -86,7 +85,8 @@ proxyPoolRouter.post("/pool/:id/check", async (c) => {
   const [proxy] = await db.select().from(proxyPool).where(eq(proxyPool.id, id));
   if (!proxy) return c.json({ error: "Proxy not found" }, 404);
 
-  const result = await checkProxyHealth(proxy.url);
+  const type = proxy.type === "vercel" || proxy.type === "cloudflare" ? proxy.type : "http";
+  const result = await checkProxyHealth(proxy.url, type);
 
   await db
     .update(proxyPool)
@@ -111,7 +111,8 @@ proxyPoolRouter.post("/pool/check-all", async (c) => {
 
   const results = await Promise.allSettled(
     proxies.map(async (proxy) => {
-      const result = await checkProxyHealth(proxy.url);
+      const type = proxy.type === "vercel" || proxy.type === "cloudflare" ? proxy.type : "http";
+      const result = await checkProxyHealth(proxy.url, type);
       await db
         .update(proxyPool)
         .set({
@@ -130,72 +131,5 @@ proxyPoolRouter.post("/pool/check-all", async (c) => {
   return c.json({
     checked: results.length,
     results: results.map((r) => (r.status === "fulfilled" ? r.value : { error: "check failed" })),
-  });
-});
-
-// List the regions available for scraping (for the dashboard dropdown).
-proxyPoolRouter.get("/scrape/countries", (c) => {
-  return c.json({ countries: COUNTRIES });
-});
-
-// Scrape proxies from free sources, optionally filtered by region/protocol,
-// optionally health-verified, then add the survivors to the pool.
-proxyPoolRouter.post("/scrape", async (c) => {
-  const body = await c.req.json<{
-    source?: ScrapeSource;
-    country?: string;
-    protocol?: ScrapeProtocol;
-    limit?: number;
-    verify?: boolean;
-  }>().catch(() => ({} as Record<string, never>));
-
-  const source = (body.source ?? "all") as ScrapeSource;
-  const country = body.country ?? "all";
-  const protocol = (body.protocol ?? "all") as ScrapeProtocol;
-  const limit = Math.min(Math.max(Number(body.limit) || 100, 1), 500);
-  const verify = body.verify !== false; // verify by default
-
-  let scraped = await scrapeProxies({ source, country, protocol, limit });
-  const scrapedCount = scraped.length;
-
-  if (scrapedCount === 0) {
-    return c.json({ scraped: 0, verified: 0, added: 0, skipped: 0, proxies: [] });
-  }
-
-  // Health-check before adding so the pool only gets working proxies.
-  let verifiedCount = scrapedCount;
-  if (verify) {
-    scraped = await verifyProxies(scraped);
-    verifiedCount = scraped.length;
-  }
-
-  // Skip proxies already in the pool (dedupe by URL).
-  const urls = scraped.map((p) => p.url);
-  const existing =
-    urls.length > 0
-      ? await db
-          .select({ url: proxyPool.url })
-          .from(proxyPool)
-          .where(inArray(proxyPool.url, urls))
-      : [];
-  const existingSet = new Set(existing.map((e) => e.url));
-
-  const toInsert = scraped.filter((p) => !existingSet.has(p.url));
-  if (toInsert.length > 0) {
-    await db.insert(proxyPool).values(
-      toInsert.map((p) => ({
-        url: p.url,
-        type: p.type,
-        label: p.country ? `scraped:${p.country}` : "scraped",
-      })),
-    );
-    invalidateProxyCache();
-  }
-
-  return c.json({
-    scraped: scrapedCount,
-    verified: verifiedCount,
-    added: toInsert.length,
-    skipped: verifiedCount - toInsert.length,
   });
 });

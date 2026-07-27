@@ -33,7 +33,7 @@ export default function UsageChart({ data = defaultData, colorsByModel = {} }: U
 
   if (data.length === 0) {
     return (
-      <div className="h-[300px] w-full flex items-center justify-center rounded-lg bg-[var(--secondary)] text-sm text-[var(--muted-foreground)]">
+      <div className="flex h-[300px] w-full items-center justify-center rounded-2xl border border-dashed border-[var(--glass-border)] bg-[var(--glass-bg)] text-sm text-[var(--muted-foreground)] backdrop-blur-xl">
         No usage data yet
       </div>
     );
@@ -51,16 +51,16 @@ export default function UsageChart({ data = defaultData, colorsByModel = {} }: U
               </linearGradient>
             ))}
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#2d3748" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--glass-border)" />
           <XAxis
             dataKey="label"
-            stroke="#6b7280"
+            stroke="var(--muted-foreground)"
             fontSize={11}
             tickLine={false}
             axisLine={false}
           />
           <YAxis
-            stroke="#6b7280"
+            stroke="var(--muted-foreground)"
             fontSize={11}
             tickLine={false}
             axisLine={false}
@@ -71,10 +71,10 @@ export default function UsageChart({ data = defaultData, colorsByModel = {} }: U
               if (!active || !payload?.length) return null;
               const sorted = [...payload].sort((a, b) => Number(b.value || 0) - Number(a.value || 0));
               return (
-                <div style={{ backgroundColor: "#1a1d27", border: "1px solid #2d3748", borderRadius: "8px", padding: "8px 12px" }}>
-                  <p style={{ color: "#9ca3af", marginBottom: 4, fontSize: 12 }}>{label}</p>
+                <div className="rounded-xl border border-[var(--glass-border)] bg-[var(--glass-bg-strong)] px-3 py-2 shadow-[var(--glass-shadow)] backdrop-blur-xl">
+                  <p className="mb-1 text-xs text-[var(--muted-foreground)]">{label}</p>
                   {sorted.map((entry) => (
-                    <p key={entry.name} style={{ color: entry.color, fontSize: 12, margin: "2px 0" }}>
+                    <p key={entry.name} className="my-0.5 text-xs" style={{ color: String(entry.color || "var(--foreground)") }}>
                       {entry.name} : {formatTokenCount(Number(entry.value || 0))}
                     </p>
                   ))}
@@ -83,7 +83,7 @@ export default function UsageChart({ data = defaultData, colorsByModel = {} }: U
             }}
           />
           <Legend
-            wrapperStyle={{ color: "#9ca3af", fontSize: "12px" }}
+            wrapperStyle={{ color: "var(--muted-foreground)", fontSize: "12px" }}
           />
           {models.map((model) => (
             <Area

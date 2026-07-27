@@ -63,27 +63,29 @@ export default function StatsCards({ data = defaultData }: StatsCardsProps) {
   ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-      {stats.map((stat) => (
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+      {stats.map((stat, index) => (
         <Card
           key={stat.label}
-          className="group relative overflow-hidden transition-all hover:border-[var(--primary)]/40"
+          className="group relative overflow-hidden"
+          style={{ animation: "page-enter 420ms cubic-bezier(0.2, 0.75, 0.2, 1) both", animationDelay: `${index * 55}ms` }}
         >
-          <CardContent className="p-4">
+          <span className={`absolute -right-8 -top-8 h-24 w-24 rounded-full blur-2xl ${stat.bgColor}`} />
+          <CardContent className="relative p-5">
             <div className="flex items-center justify-between">
               <div className="min-w-0">
-                <p className="text-xs text-[var(--muted-foreground)] uppercase tracking-wide">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
                   {stat.label}
                 </p>
-                <p className="text-2xl font-bold mt-1 text-[var(--foreground)] tabular-nums">
+                <p className="mt-1 text-3xl font-bold tracking-tight text-[var(--foreground)] tabular-nums">
                   {stat.value}
                 </p>
-                <p className="text-xs text-[var(--muted-foreground)] mt-1">
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
                   {stat.subtitle}
                 </p>
               </div>
-              <div className={`p-3 rounded-xl ${stat.bgColor} transition-transform group-hover:scale-105`}>
-                <stat.icon className={`w-5 h-5 ${stat.color}`} />
+              <div className={`rounded-2xl border border-white/10 p-3 ${stat.bgColor} transition-transform duration-300 group-hover:scale-110 group-hover:rotate-3`}>
+                <stat.icon className={`h-5 w-5 ${stat.color}`} aria-hidden="true" />
               </div>
             </div>
           </CardContent>

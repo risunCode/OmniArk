@@ -421,36 +421,6 @@ export async function checkAllProxies() {
   return fetchApi("/api/proxy-pool/pool/check-all", { method: "POST" });
 }
 
-export interface ProxyCountry {
-  code: string;
-  name: string;
-}
-
-export async function fetchProxyCountries(): Promise<{ countries: ProxyCountry[] }> {
-  return fetchApi("/api/proxy-pool/scrape/countries");
-}
-
-export interface ScrapeProxyResult {
-  scraped: number;
-  verified: number;
-  added: number;
-  skipped: number;
-}
-
-export async function scrapeProxies(options: {
-  source?: "proxyscrape" | "geonode" | "proxifly" | "all";
-  country?: string;
-  protocol?: "http" | "socks5" | "all";
-  limit?: number;
-  verify?: boolean;
-}): Promise<ScrapeProxyResult> {
-  return fetchApi("/api/proxy-pool/scrape", {
-    method: "POST",
-    body: JSON.stringify(options),
-    timeoutMs: 120_000,
-  });
-}
-
 export interface ManagedApiKey {
   id: number;
   name: string;
@@ -458,8 +428,6 @@ export interface ManagedApiKey {
   modelAllowlist: string[];
   dailyTokenLimit: number | null;
   monthlyTokenLimit: number | null;
-  totalHitLimit: number | null;
-  totalHits: number;
   dailyTokens: number;
   monthlyTokens: number;
   expiresAt: string | null;
@@ -474,7 +442,6 @@ export interface ApiKeyPolicyInput {
   modelAllowlist: string[];
   dailyTokenLimit: number | null;
   monthlyTokenLimit: number | null;
-  totalHitLimit: number | null;
   expiresAt: string | null;
 }
 

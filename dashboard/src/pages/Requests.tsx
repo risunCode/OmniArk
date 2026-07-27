@@ -237,8 +237,8 @@ export default function Requests() {
       </Tabs>
 
       {selected && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/50" onClick={() => setSelected(null)}>
-          <aside className="h-full w-full max-w-[520px] overflow-y-auto border-l border-[var(--border)] bg-[var(--card)] p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex justify-end bg-[#090b13]/45 backdrop-blur-sm" onClick={() => setSelected(null)}>
+          <aside className="h-full w-full max-w-[520px] overflow-y-auto border-l border-[var(--glass-border)] bg-[var(--glass-bg-strong)] p-5 shadow-[-22px_0_60px_rgba(1,3,12,0.3)] backdrop-blur-2xl overscroll-contain animate-[drawer-enter_320ms_cubic-bezier(0.2,0.75,0.2,1)_both]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-[var(--border)] pb-4">
               <div>
                 <h2 className="font-bold text-[var(--foreground)]">{selected.model || "Request"}</h2>

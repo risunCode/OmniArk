@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { notifyToast } from "@/components/ui/toast";
 
 export function useTimedMessage<T>(initialValue: T | null = null, defaultDelayMs = 4000) {
   const [message, setMessageState] = useState<T | null>(initialValue);
@@ -19,6 +20,7 @@ export function useTimedMessage<T>(initialValue: T | null = null, defaultDelayMs
   const setMessage = useCallback((value: T | null, delayMs = defaultDelayMs) => {
     clearTimer();
     setMessageState(value);
+    if (typeof value === "string" && value) notifyToast({ title: value, variant: "info", duration: delayMs });
     if (value !== null && delayMs > 0) {
       timerRef.current = setTimeout(() => {
         timerRef.current = null;

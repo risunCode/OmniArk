@@ -270,10 +270,15 @@ export abstract class BaseProvider {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const proxy = await getNextProxy("model");
     try {
-      const response = await fetch(url, {
+      const requestUrl = proxy?.type === "vercel" || proxy?.type === "cloudflare" ? proxy.url : url;
+      const requestHeaders = proxy?.type === "vercel" || proxy?.type === "cloudflare"
+        ? createRelayHeaders(url, init.headers)
+        : init.headers;
+      const response = await fetch(requestUrl, {
         ...init,
+        headers: requestHeaders,
         signal: controller.signal,
-        ...(proxy ? { proxy: proxy.url } : {}),
+        ...(proxy?.type === "http" ? { proxy: proxy.url } : {}),
       } as any);
       if (proxy) void markProxySuccess(proxy.id);
       return response;
@@ -284,4 +289,13 @@ export abstract class BaseProvider {
       clearTimeout(timer);
     }
   }
+}
+
+function createRelayHeaders(targetUrl: string, headers: RequestInit["headers"]): Headers {
+  const target = new URL(targetUrl);
+  const relayHeaders = new Headers(headers);
+  relayHeaders.set("x-relay-target", target.origin);
+  relayHeaders.set("x-relay-path", `${target.pathname}${target.search}`);
+  relayHeaders.delete("host");
+  return relayHeaders;
 }

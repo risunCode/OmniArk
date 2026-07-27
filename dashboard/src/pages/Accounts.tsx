@@ -655,7 +655,7 @@ export default function Accounts() {
             {byokProviders.map((provider) => (
               <Card
                 key={provider.id}
-                className="border-[var(--border)] overflow-hidden hover:border-[var(--primary)]/50 transition-all duration-200 cursor-pointer"
+                className="cursor-pointer overflow-hidden border-[var(--border)] transition-[transform,border-color,box-shadow] duration-200 hover:border-[var(--primary)]/50"
                 onClick={() => navigate(`/accounts/byok/${provider.label}`)}
               >
                 <CardHeader className="pb-3 hover:bg-[var(--secondary)]/30 transition-colors">

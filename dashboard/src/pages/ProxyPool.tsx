@@ -1,23 +1,24 @@
-import { useState, useEffect, useCallback } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useCallback, useEffect, useState } from "react";
+import { CheckCircle2, Cloud, Globe, Plus, RefreshCw, Triangle, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Globe, Plus, Trash2, Upload, RefreshCw, Power, PowerOff, Download } from "lucide-react";
-import { fetchApi, fetchProxyCountries, scrapeProxies, type ProxyCountry } from "@/lib/api";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { fetchApi } from "@/lib/api";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
+
+type ProxyType = "http" | "vercel" | "cloudflare";
 
 interface ProxyEntry {
   id: number;
   url: string;
-  type: string;
+  type: ProxyType;
   label: string | null;
-  status: string;
+  status: "active" | "disabled" | "error";
   lastUsedAt: string | null;
   lastCheckedAt: string | null;
   errorMessage: string | null;
   latencyMs: number | null;
   successCount: number;
   failCount: number;
-  createdAt: string;
 }
 
 interface ProxyPoolStatus {
@@ -26,26 +27,23 @@ interface ProxyPoolStatus {
   proxies: ProxyEntry[];
 }
 
+function getProxyTypeLabel(type: ProxyType) {
+  if (type === "vercel") return "Vercel relay";
+  if (type === "cloudflare") return "Cloudflare relay";
+  return "HTTP proxy";
+}
+
 export default function ProxyPool() {
   const [pool, setPool] = useState<ProxyPoolStatus>({ count: 0, activeCount: 0, proxies: [] });
   const [loading, setLoading] = useState(true);
   const [bulkText, setBulkText] = useState("");
+  const [proxyType, setProxyType] = useState<ProxyType>("http");
   const [checking, setChecking] = useState(false);
-  const { message, setMessage } = useTimedMessage<string>(null, 3000);
-
-  // Scrape controls
-  const [countries, setCountries] = useState<ProxyCountry[]>([]);
-  const [scrapeSource, setScrapeSource] = useState<"all" | "proxyscrape" | "geonode" | "proxifly">("all");
-  const [scrapeCountry, setScrapeCountry] = useState("all");
-  const [scrapeProtocol, setScrapeProtocol] = useState<"all" | "http" | "socks5">("all");
-  const [scrapeLimit, setScrapeLimit] = useState(50);
-  const [scrapeVerify, setScrapeVerify] = useState(true);
-  const [scraping, setScraping] = useState(false);
+  const { message, setMessage } = useTimedMessage<string>(null, 3_000);
 
   const loadPool = useCallback(async () => {
     try {
-      const data = await fetchApi<ProxyPoolStatus>("/api/proxy-pool/pool");
-      setPool(data);
+      setPool(await fetchApi<ProxyPoolStatus>("/api/proxy-pool/pool"));
     } catch {
       setPool({ count: 0, activeCount: 0, proxies: [] });
     } finally {
@@ -53,382 +51,119 @@ export default function ProxyPool() {
     }
   }, []);
 
-  useEffect(() => {
-    loadPool();
-    fetchProxyCountries()
-      .then((data) => setCountries(data.countries))
-      .catch(() => setCountries([{ code: "all", name: "Any region" }]));
-  }, [loadPool]);
+  useEffect(() => { loadPool(); }, [loadPool]);
 
-  const handleScrape = async () => {
-    setScraping(true);
+  const addProxies = async () => {
+    const proxies = bulkText.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (proxies.length === 0) return setMessage("Paste at least one proxy or relay URL");
     try {
-      const result = await scrapeProxies({
-        source: scrapeSource,
-        country: scrapeCountry,
-        protocol: scrapeProtocol,
-        limit: scrapeLimit,
-        verify: scrapeVerify,
-      });
-      if (result.added > 0) {
-        setMessage(
-          `Scraped ${result.scraped}, ${result.added} added` +
-            (scrapeVerify ? ` (${result.verified} alive)` : "") +
-            (result.skipped > 0 ? `, ${result.skipped} duplicates skipped` : ""),
-        );
-      } else if (result.scraped === 0) {
-        setMessage("No proxies found for that region/source");
-      } else {
-        setMessage(
-          scrapeVerify && result.verified === 0
-            ? `Scraped ${result.scraped} but none passed health check`
-            : "All scraped proxies already in pool",
-        );
-      }
-      loadPool();
-    } catch (e: any) {
-      setMessage(e.message || "Scrape failed");
-    } finally {
-      setScraping(false);
-    }
-  };
-
-  const handleBulkAdd = async () => {
-    if (!bulkText.trim()) {
-      setMessage("Paste proxy list first");
-      return;
-    }
-
-    const proxies = bulkText
-      .trim()
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-
-    if (proxies.length === 0) {
-      setMessage("No valid proxies found");
-      return;
-    }
-
-    try {
-      const result = await fetchApi<{ added: number }>("/api/proxy-pool/pool", {
+      const result = await fetchApi<{ added: number; invalid: string[] }>("/api/proxy-pool/pool", {
         method: "POST",
-        body: JSON.stringify({ proxies }),
+        body: JSON.stringify({ proxies, type: proxyType }),
       });
       setBulkText("");
-      setMessage(`${result.added} proxy added`);
+      setMessage(result.invalid.length > 0 ? `${result.added} added; ${result.invalid.length} invalid URL` : `${result.added} ${getProxyTypeLabel(proxyType)} added`);
       loadPool();
-    } catch (e: any) {
-      setMessage(e.message || "Failed to add proxies");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to add proxy");
     }
   };
 
-  const handleToggle = async (id: number, currentStatus: string) => {
-    const newStatus = currentStatus === "active" ? "disabled" : "active";
+  const updateStatus = async (id: number, status: ProxyEntry["status"]) => {
     try {
-      await fetchApi(`/api/proxy-pool/pool/${id}`, {
-        method: "PUT",
-        body: JSON.stringify({ status: newStatus }),
-      });
+      await fetchApi(`/api/proxy-pool/pool/${id}`, { method: "PUT", body: JSON.stringify({ status }) });
       loadPool();
-    } catch (e: any) {
-      setMessage(e.message || "Failed to toggle proxy");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to update proxy");
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const removeProxy = async (id: number) => {
     try {
       await fetchApi(`/api/proxy-pool/pool/${id}`, { method: "DELETE" });
       setMessage("Proxy removed");
       loadPool();
-    } catch (e: any) {
-      setMessage(e.message || "Failed to remove proxy");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to remove proxy");
     }
   };
 
-  const handleClearAll = async () => {
-    if (!confirm("Remove all proxies from pool?")) return;
+  const checkProxy = async (id: number) => {
     try {
-      await fetchApi("/api/proxy-pool/pool", { method: "DELETE" });
-      setMessage("Pool cleared");
+      const result = await fetchApi<{ ok: boolean; latencyMs: number; error?: string }>(`/api/proxy-pool/pool/${id}/check`, { method: "POST" });
+      setMessage(result.ok ? `Healthy · ${result.latencyMs}ms` : `Test failed: ${result.error ?? "unknown error"}`);
       loadPool();
-    } catch (e: any) {
-      setMessage(e.message || "Failed to clear pool");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Test failed");
     }
   };
 
-  const handleCheckSingle = async (id: number) => {
-    try {
-      const result = await fetchApi<{ ok: boolean; latencyMs: number; error?: string }>(
-        `/api/proxy-pool/pool/${id}/check`,
-        { method: "POST" }
-      );
-      setMessage(result.ok ? `Healthy (${result.latencyMs}ms)` : `Failed: ${result.error}`);
-      loadPool();
-    } catch (e: any) {
-      setMessage(e.message || "Health check failed");
-    }
-  };
-
-  const handleCheckAll = async () => {
+  const checkAll = async () => {
     setChecking(true);
     try {
-      const result = await fetchApi<{ checked: number }>("/api/proxy-pool/pool/check-all", {
-        method: "POST",
-      });
-      setMessage(`Checked ${result.checked} proxies`);
+      const result = await fetchApi<{ checked: number }>("/api/proxy-pool/pool/check-all", { method: "POST" });
+      setMessage(`${result.checked} entries tested`);
       loadPool();
-    } catch (e: any) {
-      setMessage(e.message || "Check all failed");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Tests failed");
     } finally {
       setChecking(false);
     }
   };
 
-  const statusBadge = (status: string) => {
-    const colors: Record<string, string> = {
-      active: "bg-[var(--success)]/10 text-[var(--success)]",
-      disabled: "bg-[var(--warning)]/10 text-[var(--warning)]",
-      error: "bg-[var(--error)]/10 text-[var(--error)]",
-    };
-    return (
-      <span className={`text-xs px-2 py-0.5 rounded ${colors[status] || "bg-[var(--muted)]/10 text-[var(--muted-foreground)]"}`}>
-        {status}
-      </span>
-    );
-  };
-
-  const latencyBadge = (ms: number | null) => {
-    if (ms == null) return null;
-    const color =
-      ms < 1000 ? "text-[var(--success)]" :
-      ms < 3000 ? "text-[var(--warning)]" :
-      "text-[var(--error)]";
-    return (
-      <span className={`text-xs font-mono shrink-0 ${color}`}>
-        {ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`}
-      </span>
-    );
-  };
-
-  const maskUrl = (url: string) => {
+  const clearPool = async () => {
+    if (!confirm("Remove every proxy and relay from this pool?")) return;
     try {
-      const u = new URL(url);
-      const masked = u.password ? `${u.protocol}//${u.username}:***@${u.host}` : `${u.protocol}//${u.host}`;
-      return masked;
-    } catch {
-      return url;
+      await fetchApi("/api/proxy-pool/pool", { method: "DELETE" });
+      setMessage("Proxy pool cleared");
+      loadPool();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to clear pool");
     }
   };
 
-  return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-[var(--foreground)]">Proxy Pool</h1>
-          <p className="text-sm text-[var(--muted-foreground)]">
-            Manage HTTP/SOCKS5 proxies for upstream requests and auth
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm text-[var(--muted-foreground)]">
-            {pool.activeCount}/{pool.count} active
-          </span>
-          <Button variant="outline" size="sm" onClick={handleCheckAll} disabled={checking}>
-            <RefreshCw className={`w-3 h-3 mr-1 ${checking ? "animate-spin" : ""}`} />
-            Check All
-          </Button>
-          {pool.count > 0 && (
-            <Button variant="outline" size="sm" onClick={handleClearAll}>
-              <Trash2 className="w-3 h-3 mr-1" />
-              Clear All
-            </Button>
-          )}
-        </div>
-      </div>
-
-      {message && (
-        <div className="px-4 py-2 rounded-md bg-[var(--secondary)] text-sm text-[var(--foreground)]">
-          {message}
-        </div>
-      )}
-
-      {/* Add Proxies */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <Plus className="w-4 h-4" />
-            Add Proxies
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <textarea
-            className="w-full h-[120px] px-3 py-2 rounded-md border border-[var(--border)] bg-[var(--background)] text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
-            placeholder={"Paste proxy list (one per line):\n\nhttp://user:pass@host:port\nsocks5://host:port\nhttp://host:port"}
-            value={bulkText}
-            onChange={(e) => setBulkText(e.target.value)}
-          />
-          <Button onClick={handleBulkAdd} className="w-full">
-            <Upload className="w-4 h-4 mr-2" />
-            Add to Pool
-          </Button>
-        </CardContent>
-      </Card>
-
-      {/* Scrape Proxies */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <Download className="w-4 h-4" />
-            Scrape Proxies
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <p className="text-sm text-[var(--muted-foreground)]">
-            Pull fresh proxies from free public sources and add them straight to the pool.
-          </p>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div className="space-y-1">
-              <label className="text-xs text-[var(--muted-foreground)]">Source</label>
-              <select
-                className="w-full px-3 py-2 rounded-md border border-[var(--border)] bg-[var(--background)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
-                value={scrapeSource}
-                onChange={(e) => setScrapeSource(e.target.value as typeof scrapeSource)}
-              >
-                <option value="all">All sources</option>
-                <option value="proxyscrape">ProxyScrape</option>
-                <option value="geonode">Geonode</option>
-                <option value="proxifly">Proxifly</option>
-              </select>
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs text-[var(--muted-foreground)]">Region</label>
-              <select
-                className="w-full px-3 py-2 rounded-md border border-[var(--border)] bg-[var(--background)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
-                value={scrapeCountry}
-                onChange={(e) => setScrapeCountry(e.target.value)}
-              >
-                {countries.map((c) => (
-                  <option key={c.code} value={c.code}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs text-[var(--muted-foreground)]">Protocol</label>
-              <select
-                className="w-full px-3 py-2 rounded-md border border-[var(--border)] bg-[var(--background)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
-                value={scrapeProtocol}
-                onChange={(e) => setScrapeProtocol(e.target.value as typeof scrapeProtocol)}
-              >
-                <option value="all">HTTP + SOCKS5</option>
-                <option value="http">HTTP</option>
-                <option value="socks5">SOCKS5</option>
-              </select>
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs text-[var(--muted-foreground)]">Max count</label>
-              <input
-                type="number"
-                min={1}
-                max={500}
-                className="w-full px-3 py-2 rounded-md border border-[var(--border)] bg-[var(--background)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
-                value={scrapeLimit}
-                onChange={(e) => setScrapeLimit(Number(e.target.value))}
-              />
-            </div>
-          </div>
-          <div className="flex items-center justify-between gap-3">
-            <label className="flex items-center gap-2 text-sm text-[var(--muted-foreground)] cursor-pointer">
-              <input
-                type="checkbox"
-                checked={scrapeVerify}
-                onChange={(e) => setScrapeVerify(e.target.checked)}
-              />
-              Health-check before adding (slower, but only keeps working proxies)
-            </label>
-            <Button onClick={handleScrape} disabled={scraping}>
-              <Download className={`w-4 h-4 mr-2 ${scraping ? "animate-pulse" : ""}`} />
-              {scraping ? "Scraping..." : "Scrape & Add"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Proxy List */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <Globe className="w-4 h-4" />
-            Proxy List
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {loading ? (
-            <p className="text-sm text-[var(--muted-foreground)]">Loading...</p>
-          ) : pool.proxies.length === 0 ? (
-            <p className="text-sm text-[var(--muted-foreground)]">
-              No proxies in pool. Add proxies above to enable IP rotation.
-            </p>
-          ) : (
-            <div className="space-y-2">
-              {pool.proxies.map((proxy) => (
-                <div
-                  key={proxy.id}
-                  className="flex items-center justify-between px-4 py-3 rounded-md bg-[var(--secondary)]"
-                >
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
-                    <Globe className="w-4 h-4 text-[var(--muted-foreground)] shrink-0" />
-                    <span className="font-mono text-sm truncate">{maskUrl(proxy.url)}</span>
-                    <span className="text-xs text-[var(--muted-foreground)] shrink-0">{proxy.type}</span>
-                    {statusBadge(proxy.status)}
-                    {latencyBadge(proxy.latencyMs)}
-                    <span className="text-xs text-[var(--muted-foreground)] shrink-0">
-                      {proxy.successCount}ok / {proxy.failCount}fail
-                    </span>
-                    {proxy.lastUsedAt && (
-                      <span className="text-xs text-[var(--muted-foreground)] shrink-0">
-                        used {new Date(proxy.lastUsedAt).toLocaleString()}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleCheckSingle(proxy.id)}
-                      title="Health check"
-                    >
-                      <RefreshCw className="w-3 h-3" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleToggle(proxy.id, proxy.status)}
-                      title={proxy.status === "active" ? "Disable" : "Enable"}
-                    >
-                      {proxy.status === "active" ? (
-                        <PowerOff className="w-3 h-3" />
-                      ) : (
-                        <Power className="w-3 h-3" />
-                      )}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleDelete(proxy.id)}
-                      title="Delete"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+  return <div className="space-y-6">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div><h1 className="text-2xl font-bold text-[var(--foreground)]">Proxy Pool</h1><p className="mt-1 text-sm text-[var(--muted-foreground)]">Route upstream traffic through HTTP proxies or Vercel and Cloudflare relays.</p></div>
+      <div className="flex items-center gap-2"><span className="text-sm text-[var(--muted-foreground)]">{pool.activeCount}/{pool.count} active</span><Button variant="outline" size="sm" onClick={checkAll} disabled={checking}><RefreshCw className={`mr-1 h-3 w-3 ${checking ? "animate-spin" : ""}`} />Test all</Button>{pool.count > 0 && <Button variant="outline" size="sm" onClick={clearPool}><Trash2 className="mr-1 h-3 w-3" />Clear</Button>}</div>
     </div>
-  );
+
+    {message && <div className="rounded-xl border border-[var(--glass-border)] bg-[var(--glass-bg)] px-4 py-2 text-sm text-[var(--foreground)]">{message}</div>}
+
+    <Card>
+      <CardHeader><CardTitle className="flex items-center gap-2 text-base"><Plus className="h-4 w-4" />Add routing endpoint</CardTitle></CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <ProxyTypeOption type="http" selected={proxyType} onSelect={setProxyType} icon={Globe} title="HTTP proxy" description="Standard HTTP/HTTPS CONNECT proxy" />
+          <ProxyTypeOption type="vercel" selected={proxyType} onSelect={setProxyType} icon={Triangle} title="Vercel proxy" description="Relay URL using x-relay headers" />
+          <ProxyTypeOption type="cloudflare" selected={proxyType} onSelect={setProxyType} icon={Cloud} title="Cloudflare proxy" description="Worker relay using x-relay headers" />
+        </div>
+        <textarea className="h-[120px] w-full resize-none rounded-xl border border-[var(--glass-border)] bg-[var(--glass-bg)] px-3 py-2 font-mono text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--primary)]/20" placeholder={proxyType === "http" ? "One HTTP proxy per line\n\nhttp://user:pass@host:port\nhttp://host:port" : "One deployed relay URL per line\n\nhttps://your-relay.example.com"} value={bulkText} onChange={(event) => setBulkText(event.target.value)} />
+        <div className="flex flex-col justify-between gap-3 rounded-xl bg-[var(--secondary)]/50 p-3 text-xs text-[var(--muted-foreground)] sm:flex-row sm:items-center"><p>{proxyType === "http" ? "HTTP proxies are passed directly through Bun's proxy transport." : "Relay tests call the relay with a safe httpbin target; upstream traffic retains its method, headers, and body."}</p><Button onClick={addProxies}><Upload className="mr-2 h-4 w-4" />Add to pool</Button></div>
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader><CardTitle className="flex items-center gap-2 text-base"><Globe className="h-4 w-4" />Routing endpoints</CardTitle></CardHeader>
+      <CardContent>{loading ? <p className="text-sm text-[var(--muted-foreground)]">Loading...</p> : pool.proxies.length === 0 ? <p className="py-8 text-center text-sm text-[var(--muted-foreground)]">No endpoints configured. Add an HTTP proxy, Vercel relay, or Cloudflare relay above.</p> : <div className="space-y-2">{pool.proxies.map((proxy) => <ProxyRow key={proxy.id} proxy={proxy} onCheck={checkProxy} onToggle={updateStatus} onRemove={removeProxy} />)}</div>}</CardContent>
+    </Card>
+  </div>;
+}
+
+function ProxyTypeOption({ type, selected, onSelect, icon: Icon, title, description }: { type: ProxyType; selected: ProxyType; onSelect: (type: ProxyType) => void; icon: typeof Globe; title: string; description: string }) {
+  const active = selected === type;
+  return <label className={`relative flex cursor-pointer items-center gap-3 rounded-xl border p-3 transition ${active ? "border-[var(--primary)] bg-[var(--primary)]/10" : "border-[var(--glass-border)] bg-[var(--glass-bg)] hover:bg-[var(--glass-hover)]"}`}><input type="checkbox" className="sr-only" checked={active} onChange={() => onSelect(type)} /><span className={`grid h-9 w-9 place-items-center rounded-xl ${active ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "bg-[var(--secondary)] text-[var(--muted-foreground)]"}`}><Icon className="h-4 w-4" /></span><span><span className="block text-sm font-semibold text-[var(--foreground)]">{title}</span><span className="block text-xs text-[var(--muted-foreground)]">{description}</span></span>{active && <CheckCircle2 className="absolute right-3 top-3 h-4 w-4 text-[var(--primary)]" />}</label>;
+}
+
+function ProxyRow({ proxy, onCheck, onToggle, onRemove }: { proxy: ProxyEntry; onCheck: (id: number) => void; onToggle: (id: number, status: ProxyEntry["status"]) => void; onRemove: (id: number) => void }) {
+  const statusColor = proxy.status === "active" ? "bg-[var(--success)]" : proxy.status === "error" ? "bg-[var(--error)]" : "bg-[var(--warning)]";
+  const protocol = proxy.type === "http" ? maskUrl(proxy.url) : proxy.url;
+  return <div className="flex flex-col gap-3 rounded-xl border border-[var(--glass-border)] bg-[var(--glass-bg)] p-3 transition hover:bg-[var(--glass-hover)] sm:flex-row sm:items-center"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[var(--secondary)] text-[var(--primary)]">{proxy.type === "vercel" ? <Triangle className="h-4 w-4" /> : proxy.type === "cloudflare" ? <Cloud className="h-4 w-4" /> : <Globe className="h-4 w-4" />}</span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="truncate font-mono text-sm text-[var(--foreground)]">{protocol}</p><span className="rounded-full bg-[var(--secondary)] px-2 py-0.5 text-[10px] font-medium text-[var(--muted-foreground)]">{getProxyTypeLabel(proxy.type)}</span><span className="flex items-center gap-1 text-[10px] text-[var(--muted-foreground)]"><i className={`h-1.5 w-1.5 rounded-full ${statusColor}`} />{proxy.status}</span></div><p className="mt-1 text-xs text-[var(--muted-foreground)]">{proxy.latencyMs == null ? "Not tested" : `${proxy.latencyMs}ms`} · {proxy.successCount} passed · {proxy.failCount} failed {proxy.errorMessage ? `· ${proxy.errorMessage}` : ""}</p></div><div className="flex shrink-0 items-center gap-1"><Button variant="ghost" size="sm" onClick={() => onCheck(proxy.id)} title="Test endpoint"><RefreshCw className="h-3.5 w-3.5" /></Button><Button variant="ghost" size="sm" onClick={() => onToggle(proxy.id, proxy.status === "active" ? "disabled" : "active")} title={proxy.status === "active" ? "Disable" : "Enable"}>{proxy.status === "active" ? "Disable" : "Enable"}</Button><Button variant="ghost" size="sm" onClick={() => onRemove(proxy.id)} title="Delete"><Trash2 className="h-3.5 w-3.5" /></Button></div></div>;
+}
+
+function maskUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    return parsed.password ? `${parsed.protocol}//${parsed.username}:***@${parsed.host}` : `${parsed.protocol}//${parsed.host}`;
+  } catch { return url; }
 }
