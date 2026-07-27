@@ -31,11 +31,11 @@ RUN addgroup -S omniark && adduser -S -G omniark -u 10001 omniark \
 COPY --from=build --chown=omniark:omniark /app/src ./src
 COPY --from=build --chown=omniark:omniark /app/dashboard/dist ./dashboard/dist
 
-USER omniark
+USER root
 
 EXPOSE 12800
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD bun -e 'const response = await fetch("http://127.0.0.1:12800/api/health"); process.exit(response.ok ? 0 : 1)'
+  CMD bun -e 'const response = await fetch("http://127.0.0.1:" + process.env.PORT + "/api/health"); process.exit(response.ok ? 0 : 1)'
 
 CMD ["bun", "src/index.ts"]
