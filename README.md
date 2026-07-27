@@ -25,7 +25,7 @@ Then start the server:
 omniark start
 ```
 
-Open the dashboard at **http://localhost:1931**.
+Open the dashboard at **http://localhost:12800**.
 
 ---
 
@@ -65,6 +65,8 @@ So if you’re looking for the original full-featured version with the auth bot 
 | `API_KEY` | `pool-proxy-secret-key` | Bearer token for clients and dashboard |
 | `DATABASE_PATH` | `./data/omniark.db` | SQLite database location |
 | `ENCRYPTION_KEY` | random (installer) | 32-char hex; encrypts saved tokens |
+
+The backend, dashboard, WebSocket endpoint, and OpenAI-compatible proxy are one service on the same `PORT`. There is no separate dashboard process or dashboard port in the deployment image. On Railway, use the public service domain without a port; Railway routes it to the service's runtime `PORT`.
 
 Optional log-body toggles:
 
