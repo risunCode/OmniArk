@@ -491,7 +491,7 @@ export interface ParsedDelta {
   reasoningContent?: string;
   toolCalls?: any[];
   finishReason?: string;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cached_tokens?: number };
 }
 
 export function parseSseLine(line: string): ParsedDelta | null {
@@ -511,6 +511,7 @@ export function parseSseLine(line: string): ParsedDelta | null {
         prompt_tokens: Number(inner.usage.prompt_tokens) || 0,
         completion_tokens: Number(inner.usage.completion_tokens) || 0,
         total_tokens: Number(inner.usage.total_tokens) || 0,
+        cached_tokens: Number(inner.usage.cached_tokens || inner.usage.cache_read_input_tokens || inner.usage.prompt_cache_hit_tokens || inner.usage.prompt_tokens_details?.cached_tokens || 0),
       };
     }
 

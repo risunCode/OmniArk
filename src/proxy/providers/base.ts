@@ -39,6 +39,7 @@ export interface ChatCompletionResponse {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    cached_tokens?: number;
   };
 }
 
@@ -56,6 +57,7 @@ export interface StreamChunk {
     prompt_tokens?: number;
     completion_tokens?: number;
     total_tokens?: number;
+    cached_tokens?: number;
   };
 }
 
@@ -119,6 +121,7 @@ export interface ProviderResult {
   tokensUsed?: number;
   promptTokens?: number;
   completionTokens?: number;
+  cachedTokens?: number;
   creditsUsed?: number;
   creditSource?: CreditSource;
   error?: string;

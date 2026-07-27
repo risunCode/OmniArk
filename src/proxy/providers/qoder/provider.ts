@@ -112,7 +112,7 @@ export class QoderProvider extends BaseProvider {
     let fullContent = "";
     const toolCalls: ToolCallAcc[] = [];
     let finishReason: string | null = null;
-    let finalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    let finalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0 };
 
     try {
       while (true) {
@@ -130,6 +130,7 @@ export class QoderProvider extends BaseProvider {
                 prompt_tokens: Number(chunk.usage.prompt_tokens) || 0,
                 completion_tokens: Number(chunk.usage.completion_tokens) || 0,
                 total_tokens: Number(chunk.usage.total_tokens) || 0,
+                cached_tokens: Number(chunk.usage.cached_tokens || chunk.usage.cache_read_input_tokens || chunk.usage.prompt_cache_hit_tokens || chunk.usage.prompt_tokens_details?.cached_tokens || 0),
               };
             }
             const delta = chunk.choices?.[0]?.delta;
@@ -156,7 +157,7 @@ export class QoderProvider extends BaseProvider {
     // Fall back to estimation if upstream didn't report usage
     if (finalUsage.total_tokens === 0) {
       const estimated = this.estimateMessagesTokens(request.messages);
-      finalUsage = { prompt_tokens: estimated, completion_tokens: this.estimateTokens(fullContent), total_tokens: estimated + this.estimateTokens(fullContent) };
+      finalUsage = { prompt_tokens: estimated, completion_tokens: this.estimateTokens(fullContent), total_tokens: estimated + this.estimateTokens(fullContent), cached_tokens: 0 };
     }
 
     const filledToolCalls = toolCalls.filter((t) => t && t.id);
@@ -185,6 +186,7 @@ export class QoderProvider extends BaseProvider {
       tokensUsed: finalUsage.total_tokens,
       promptTokens: finalUsage.prompt_tokens,
       completionTokens: finalUsage.completion_tokens,
+      cachedTokens: finalUsage.cached_tokens,
     };
   }
 
@@ -243,7 +245,7 @@ export class QoderProvider extends BaseProvider {
     const encoder = new TextEncoder();
 
     // Track usage across the stream — will be emitted in final chunk
-    let accumulatedUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    let accumulatedUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0 };
 
     const stream = new ReadableStream<Uint8Array>({
       start: async (controller) => {
@@ -259,7 +261,7 @@ export class QoderProvider extends BaseProvider {
         const STREAM_TIMEOUT = 300000; // 5 minutes
         let streamActive = true;
 
-        const enqueue = (delta: any, finishReason: string | null = null, usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => {
+        const enqueue = (delta: any, finishReason: string | null = null, usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cached_tokens?: number }) => {
           if (!streamActive) {
             return; // Skip enqueue if stream is already closed
           }
@@ -350,7 +352,10 @@ export class QoderProvider extends BaseProvider {
 
               // Track usage from upstream (usually in final chunk)
               if (parsedDelta.usage) {
-                accumulatedUsage = parsedDelta.usage;
+                accumulatedUsage = {
+                  ...parsedDelta.usage,
+                  cached_tokens: parsedDelta.usage.cached_tokens || 0,
+                };
               }
 
               // Build delta object, combining role with first content (OpenAI spec)
@@ -453,6 +458,7 @@ export class QoderProvider extends BaseProvider {
       tokensUsed: accumulatedUsage.total_tokens,
       promptTokens: accumulatedUsage.prompt_tokens,
       completionTokens: accumulatedUsage.completion_tokens,
+      cachedTokens: accumulatedUsage.cached_tokens,
       ...(refreshed ? { tokens: JSON.stringify(tokens) } : {}),
     };
   }
