@@ -1,0 +1,27 @@
+{
+  "name": "omniark",
+  "version": "1.0.0",
+  "description": "AI Proxy Pool for Multiple Providers (Kiro, Codex, Qoder, BYOK) — PRIVATE",
+  "type": "module",
+  "scripts": {
+    "start": "bun scripts/production.ts",
+    "start:fast": "bun scripts/production.ts --skip-build",
+    "dev": "bun scripts/start.ts",
+    "build": "cd dashboard && bun run build",
+    "migrate": "bun src/db/migrate.ts",
+    "doctor": "bun scripts/doctor.ts",
+    "setup": "bun install.ts",
+    "setup:win": "bun install.ts",
+    "preflight": "bun scripts/preflight.ts"
+  },
+  "dependencies": {
+    "cbor-x": "^1.6.4",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.12.17"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "bun-types": "latest",
+    "drizzle-kit": "^0.31.10"
+  }
+}

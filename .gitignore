@@ -1,0 +1,67 @@
+# dependencies
+node_modules
+
+# output
+dist
+out
+*.tgz
+
+# coverage
+coverage
+*.lcov
+
+# logs & pid files
+logs
+*.log
+.omniark.log
+.omniark.pid
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# dotenv environment variable files
+.env
+.env.*.local
+.env.local
+
+# Claude Code local project overrides
+.claude/settings.local.json
+.claude/plans/
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# IntelliJ based IDEs
+.idea
+
+# Finder (MacOS) folder config
+.DS_Store
+
+# Database
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+omniark.db
+
+# Drizzle migrations
+drizzle/
+
+# Debug artifacts
+*.png
+
+# Nested git repos (external services)
+services/windsurf-api/
+
+# Local artifacts
+test-compat.out
+
+# Local test/debug scripts at project root (not part of the proxy)
+/test-*.ts
+/test-*.sh
+/test-*.mjs
+/test-*.js
+
+# Local code-exploration indexes
+.codegraph/

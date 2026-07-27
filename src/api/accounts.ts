@@ -1,0 +1,1655 @@
+import { Hono } from "hono";
+import { db } from "../db/index";
+import { accounts, requestLogs, settings } from "../db/schema";
+import { eq, inArray } from "drizzle-orm";
+import { encrypt, decrypt } from "../utils/crypto";
+import { broadcast } from "../ws/index";
+import type { NewAccount } from "../db/schema";
+import { pool, type ProviderName } from "../proxy/pool";
+import { activateQoderPat } from "../proxy/providers/qoder";
+
+export const accountsRouter = new Hono();
+
+type ByokKeyInput = {
+  id?: number;
+  label?: string;
+  key?: string;
+  api_key?: string;
+  enabled?: boolean;
+  weight?: number;
+  priority?: number;
+};
+
+type ByokTokensShape = {
+  base_url?: string;
+  api_key?: string;
+  format?: "openai" | "anthropic" | "auto";
+  models?: string[];
+  model_prefix?: string;
+  headers?: Record<string, string>;
+  key_label?: string;
+  weight?: number;
+  priority?: number;
+  load_balancing_method?: "round_robin" | "sequential" | "least_inflight";
+};
+
+const BYOK_PREFIX_RE = /^[a-z0-9-]+$/;
+const BYOK_KEY_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
+
+function parseByokTokens(raw: unknown): ByokTokensShape {
+  if (!raw) return {};
+  try {
+    return (typeof raw === "string" ? JSON.parse(raw) : raw) as ByokTokensShape;
+  } catch {
+    return {};
+  }
+}
+
+function getByokPrefix(account: { email: string; tokens: unknown }): string {
+  const tokens = parseByokTokens(account.tokens);
+  return tokens.model_prefix || account.email.split("#")[0] || account.email;
+}
+
+function getByokKeyLabel(account: { email: string; tokens: unknown }): string {
+  const tokens = parseByokTokens(account.tokens);
+  if (tokens.key_label) return tokens.key_label;
+  const marker = account.email.indexOf("#");
+  return marker >= 0 ? account.email.slice(marker + 1) || "default" : "default";
+}
+
+function normalizeModels(models: unknown): string[] {
+  if (!Array.isArray(models)) return [];
+  return Array.from(new Set(models.map((m) => String(m).trim()).filter(Boolean)));
+}
+
+function normalizeByokKeys(apiKeys: unknown, legacyApiKey?: string): Array<{ label: string; key: string; weight?: number; priority?: number }> {
+  const rawKeys = Array.isArray(apiKeys)
+    ? apiKeys as ByokKeyInput[]
+    : legacyApiKey
+      ? [{ label: "default", key: legacyApiKey }]
+      : [];
+
+  const normalized: Array<{ label: string; key: string; weight?: number; priority?: number }> = [];
+  const seen = new Set<string>();
+  for (const [index, item] of rawKeys.entries()) {
+    const label = String(item.label || `key-${index + 1}`).trim().toLowerCase();
+    const key = String(item.key || item.api_key || "").trim();
+    if (!key) continue;
+    if (!BYOK_KEY_LABEL_RE.test(label)) {
+      throw new Error("key label must start with lowercase alphanumeric and contain only lowercase letters, numbers, hyphen, or underscore");
+    }
+    if (seen.has(label)) throw new Error(`duplicate BYOK key label: ${label}`);
+    seen.add(label);
+    normalized.push({
+      label,
+      key,
+      weight: Number.isFinite(Number(item.weight)) ? Number(item.weight) : undefined,
+      priority: Number.isFinite(Number(item.priority)) ? Number(item.priority) : index,
+    });
+  }
+  return normalized;
+}
+
+function buildByokEmail(prefix: string, keyLabel: string): string {
+  return `${prefix}#${keyLabel}`;
+}
+
+function byokLbSettingKey(prefix: string): string {
+  return `byok_${prefix}_lb_method`;
+}
+
+function normalizeByokLbMethod(value: unknown): "round_robin" | "sequential" | "least_inflight" {
+  return value === "sequential" || value === "least_inflight" ? value : "round_robin";
+}
+
+async function setByokLbMethod(prefix: string, method: string) {
+  const key = byokLbSettingKey(prefix);
+  const value = normalizeByokLbMethod(method);
+  const existing = await db.select().from(settings).where(eq(settings.key, key));
+  if (existing.length > 0) {
+    await db.update(settings).set({ value, updatedAt: new Date() }).where(eq(settings.key, key));
+  } else {
+    await db.insert(settings).values({ key, value });
+  }
+  pool.invalidateLoadBalancingCache();
+}
+
+async function getByokLbMethods(prefixes: string[]): Promise<Map<string, string>> {
+  const wanted = new Set(prefixes.map(byokLbSettingKey));
+  const rows = await db.select().from(settings);
+  const result = new Map<string, string>();
+  for (const row of rows) {
+    if (!wanted.has(row.key) || !row.value) continue;
+    const prefix = row.key.replace(/^byok_/, "").replace(/_lb_method$/, "");
+    result.set(prefix, normalizeByokLbMethod(row.value));
+  }
+  return result;
+}
+
+async function refreshByokRuntime() {
+  pool.invalidate("byok" as ProviderName);
+  const { refreshByokModels } = await import("../proxy/providers/registry");
+  await refreshByokModels();
+}
+
+/**
+ * GET /api/accounts - List all accounts
+ */
+accountsRouter.get("/", async (c) => {
+  const allAccounts = await db.select().from(accounts);
+
+  // Don't expose passwords in response
+  const sanitized = allAccounts.map((acc) => ({
+    ...acc,
+    password: "***",
+    tokens: acc.tokens ? "[set]" : null,
+  }));
+
+  return c.json({ data: sanitized, total: sanitized.length });
+});
+
+/**
+ * BYOK (Bring Your Own Key) Management Endpoints
+ * NOTE: Must be defined BEFORE /:id routes to avoid route collision
+ */
+
+/**
+ * POST /api/accounts/byok - Create BYOK provider group with one or more API keys.
+ * Backward compatible: accepts either `api_key` or `api_keys[]`.
+ */
+accountsRouter.post("/byok", async (c) => {
+  const body = await c.req.json<{
+    label: string;
+    base_url: string;
+    api_key?: string;
+    api_keys?: ByokKeyInput[];
+    format?: "openai" | "anthropic" | "auto";
+    models: string[];
+    headers?: Record<string, string>;
+    load_balancing_method?: "round_robin" | "sequential" | "least_inflight";
+  }>();
+
+  const label = String(body.label || "").trim().toLowerCase();
+  const baseUrl = String(body.base_url || "").trim().replace(/\/$/, "");
+  const models = normalizeModels(body.models);
+
+  if (!label || !baseUrl || models.length === 0) {
+    return c.json({ error: "label, base_url, and models[] are required" }, 400);
+  }
+  if (!BYOK_PREFIX_RE.test(label)) {
+    return c.json({ error: "label must be lowercase alphanumeric with hyphens only" }, 400);
+  }
+
+  let keyInputs: Array<{ label: string; key: string; weight?: number; priority?: number }>;
+  try {
+    keyInputs = normalizeByokKeys(body.api_keys, body.api_key);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+  if (keyInputs.length === 0) {
+    return c.json({ error: "At least one API key is required" }, 400);
+  }
+
+  const existingByok = await db.select().from(accounts).where(eq(accounts.provider, "byok"));
+  if (existingByok.some((acc) => getByokPrefix(acc) === label)) {
+    return c.json({ error: "BYOK provider with this label already exists" }, 409);
+  }
+
+  try {
+    const createdRows = [];
+    for (const [index, keyInput] of keyInputs.entries()) {
+      const tokens: ByokTokensShape = {
+        base_url: baseUrl,
+        format: body.format || "auto",
+        models,
+        model_prefix: label,
+        headers: body.headers || {},
+        key_label: keyInput.label,
+        weight: keyInput.weight,
+        priority: keyInput.priority ?? index,
+        load_balancing_method: normalizeByokLbMethod(body.load_balancing_method),
+      };
+
+      const result = await db.insert(accounts).values({
+        provider: "byok",
+        email: buildByokEmail(label, keyInput.label),
+        password: encrypt(keyInput.key),
+        status: "active",
+        enabled: true,
+        tokens,
+        quotaLimit: -1,
+        quotaRemaining: -1,
+      }).returning();
+      if (result[0]) createdRows.push(result[0]);
+    }
+
+    await setByokLbMethod(label, normalizeByokLbMethod(body.load_balancing_method));
+    await refreshByokRuntime();
+    broadcast({
+      type: "byok_created",
+      data: { id: createdRows[0]?.id, label, keyCount: createdRows.length },
+    });
+
+    return c.json({
+      success: true,
+      id: createdRows[0]?.id,
+      label,
+      key_count: createdRows.length,
+      models: models.map((m) => `${label}-${m}`),
+    }, 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
+/**
+ * GET /api/accounts/byok - List BYOK provider groups with masked key metadata.
+ */
+accountsRouter.get("/byok", async (c) => {
+  const byokAccounts = await db.select().from(accounts)
+    .where(eq(accounts.provider, "byok"));
+
+  const lbMethods = await getByokLbMethods(Array.from(new Set(byokAccounts.map((acc) => getByokPrefix(acc)))));
+
+  const groups = new Map<string, {
+    id: number;
+    label: string;
+    base_url: string;
+    format: "openai" | "anthropic" | "auto";
+    models: string[];
+    model_prefix: string;
+    headers?: Record<string, string>;
+    status: string;
+    enabled: boolean;
+    available_models: string[];
+    key_count: number;
+    active_key_count: number;
+    load_balancing_method: string;
+    keys: Array<{
+      id: number;
+      label: string;
+      status: string;
+      enabled: boolean;
+      weight?: number;
+      priority?: number;
+      lastUsedAt?: Date | null;
+      errorMessage?: string | null;
+    }>;
+  }>();
+
+  for (const acc of byokAccounts) {
+    const tokens = parseByokTokens(acc.tokens);
+    const prefix = tokens.model_prefix || getByokPrefix(acc);
+    const keyLabel = getByokKeyLabel(acc);
+    const models = normalizeModels(tokens.models || []);
+    const existing = groups.get(prefix);
+
+    if (!existing) {
+      groups.set(prefix, {
+        id: acc.id,
+        label: prefix,
+        base_url: tokens.base_url || "",
+        format: tokens.format || "auto",
+        models,
+        model_prefix: prefix,
+        headers: tokens.headers || {},
+        status: acc.status,
+        enabled: Boolean(acc.enabled),
+        available_models: models.map((m) => `${prefix}-${m}`),
+        key_count: 0,
+        active_key_count: 0,
+        load_balancing_method: lbMethods.get(prefix) || tokens.load_balancing_method || "round_robin",
+        keys: [],
+      });
+    } else {
+      const modelSet = new Set(existing.models);
+      for (const model of models) modelSet.add(model);
+      existing.models = Array.from(modelSet);
+      existing.available_models = existing.models.map((m) => `${prefix}-${m}`);
+      existing.enabled = existing.enabled || Boolean(acc.enabled);
+      existing.status = existing.status === "active" || acc.status !== "active" ? existing.status : "active";
+    }
+
+    const group = groups.get(prefix)!;
+    group.key_count += 1;
+    if (acc.enabled && acc.status === "active") group.active_key_count += 1;
+    group.keys.push({
+      id: acc.id,
+      label: keyLabel,
+      status: acc.status,
+      enabled: Boolean(acc.enabled),
+      weight: tokens.weight,
+      priority: tokens.priority,
+      lastUsedAt: acc.lastUsedAt,
+      errorMessage: acc.errorMessage,
+    });
+  }
+
+  const providers = Array.from(groups.values()).map((group) => ({
+    ...group,
+    keys: group.keys.sort((a, b) => (Number(a.priority ?? 9999) - Number(b.priority ?? 9999)) || a.id - b.id),
+  })).sort((a, b) => a.label.localeCompare(b.label));
+
+  return c.json({ providers, total: providers.length });
+});
+
+/**
+ * POST /api/accounts/byok/:id/reveal - Reveal a stored BYOK key secret.
+ *
+ * The list endpoint intentionally keeps secrets masked. This endpoint is called
+ * only on an explicit eye-icon action from the authenticated dashboard so the
+ * secret is not sent with normal page loads or websocket refreshes.
+ */
+accountsRouter.post("/byok/:id/reveal", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isFinite(id)) return c.json({ error: "Invalid BYOK key id" }, 400);
+
+  const account = await db.select().from(accounts).where(eq(accounts.id, id)).get();
+  if (!account || account.provider !== "byok") {
+    return c.json({ error: "BYOK key not found" }, 404);
+  }
+
+  try {
+    return c.json({
+      success: true,
+      id: account.id,
+      label: getByokKeyLabel(account),
+      key: decrypt(account.password),
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Failed to decrypt BYOK key" }, 500);
+  }
+});
+
+/**
+ * PATCH /api/accounts/byok/:id - Update a BYOK provider group.
+ * If `api_keys` is provided it becomes the desired key set: existing keys can be
+ * referenced by id/label and omitted keys are deleted from the group.
+ */
+accountsRouter.patch("/byok/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    base_url?: string;
+    api_key?: string;
+    api_keys?: ByokKeyInput[];
+    format?: "openai" | "anthropic" | "auto";
+    models?: string[];
+    headers?: Record<string, string>;
+    load_balancing_method?: "round_robin" | "sequential" | "least_inflight";
+  }>();
+
+  const account = await db.select().from(accounts)
+    .where(eq(accounts.id, id))
+    .get();
+
+  if (!account || account.provider !== "byok") {
+    return c.json({ error: "BYOK provider not found" }, 404);
+  }
+
+  const prefix = getByokPrefix(account);
+  const allByok = await db.select().from(accounts).where(eq(accounts.provider, "byok"));
+  const groupAccounts = allByok.filter((acc) => getByokPrefix(acc) === prefix);
+  const currentTokens = parseByokTokens(account.tokens);
+  const nextBaseUrl = body.base_url?.trim().replace(/\/$/, "") || currentTokens.base_url || "";
+  const nextFormat = body.format || currentTokens.format || "auto";
+  const nextModels = body.models ? normalizeModels(body.models) : normalizeModels(currentTokens.models || []);
+  const nextHeaders = body.headers ?? currentTokens.headers ?? {};
+
+  if (!nextBaseUrl || nextModels.length === 0) {
+    return c.json({ error: "base_url and at least one model are required" }, 400);
+  }
+
+  try {
+    const keyPayloadProvided = Array.isArray(body.api_keys);
+    const desiredKeys = keyPayloadProvided ? (body.api_keys || []) : [];
+    const touchedIds = new Set<number>();
+
+    if (keyPayloadProvided) {
+      const seenLabels = new Set<string>();
+      for (const [index, keyInput] of desiredKeys.entries()) {
+        const keyLabel = String(keyInput.label || `key-${index + 1}`).trim().toLowerCase();
+        const keySecret = String(keyInput.key || keyInput.api_key || "").trim();
+        if (!BYOK_KEY_LABEL_RE.test(keyLabel)) {
+          return c.json({ error: "key label must start with lowercase alphanumeric and contain only lowercase letters, numbers, hyphen, or underscore" }, 400);
+        }
+        if (seenLabels.has(keyLabel)) return c.json({ error: `duplicate BYOK key label: ${keyLabel}` }, 400);
+        seenLabels.add(keyLabel);
+
+        const existing = groupAccounts.find((acc) =>
+          (keyInput.id && acc.id === keyInput.id) || getByokKeyLabel(acc) === keyLabel
+        );
+        const tokens: ByokTokensShape = {
+          ...parseByokTokens(existing?.tokens),
+          base_url: nextBaseUrl,
+          format: nextFormat,
+          models: nextModels,
+          model_prefix: prefix,
+          headers: nextHeaders,
+          key_label: keyLabel,
+          weight: Number.isFinite(Number(keyInput.weight)) ? Number(keyInput.weight) : undefined,
+          priority: Number.isFinite(Number(keyInput.priority)) ? Number(keyInput.priority) : index,
+          load_balancing_method: normalizeByokLbMethod(body.load_balancing_method || currentTokens.load_balancing_method),
+        };
+
+        if (existing) {
+          const updateData: Record<string, unknown> = {
+            email: buildByokEmail(prefix, keyLabel),
+            tokens,
+            enabled: typeof keyInput.enabled === "boolean" ? keyInput.enabled : existing.enabled,
+            updatedAt: new Date(),
+          };
+          if (keySecret) updateData.password = encrypt(keySecret);
+          await db.update(accounts).set(updateData).where(eq(accounts.id, existing.id));
+          touchedIds.add(existing.id);
+        } else {
+          if (!keySecret) return c.json({ error: `new key "${keyLabel}" requires a secret` }, 400);
+          const inserted = await db.insert(accounts).values({
+            provider: "byok",
+            email: buildByokEmail(prefix, keyLabel),
+            password: encrypt(keySecret),
+            status: "active",
+            enabled: keyInput.enabled ?? true,
+            tokens,
+            quotaLimit: -1,
+            quotaRemaining: -1,
+          }).returning();
+          if (inserted[0]) touchedIds.add(inserted[0].id);
+        }
+      }
+
+      const toDelete = groupAccounts.filter((acc) => !touchedIds.has(acc.id));
+      for (const acc of toDelete) {
+        await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, acc.id));
+        await db.delete(accounts).where(eq(accounts.id, acc.id));
+      }
+    } else {
+      for (const acc of groupAccounts) {
+        const tokens = parseByokTokens(acc.tokens);
+        const updateData: Record<string, unknown> = {
+          tokens: {
+            ...tokens,
+            base_url: nextBaseUrl,
+            format: nextFormat,
+            models: nextModels,
+            model_prefix: prefix,
+            headers: nextHeaders,
+            load_balancing_method: normalizeByokLbMethod(body.load_balancing_method || tokens.load_balancing_method),
+          },
+          updatedAt: new Date(),
+        };
+        if (body.api_key && acc.id === id) updateData.password = encrypt(body.api_key);
+        await db.update(accounts).set(updateData).where(eq(accounts.id, acc.id));
+      }
+    }
+
+    await setByokLbMethod(prefix, normalizeByokLbMethod(body.load_balancing_method || currentTokens.load_balancing_method));
+    await refreshByokRuntime();
+    broadcast({ type: "byok_updated", data: { id, label: prefix } });
+
+    return c.json({
+      success: true,
+      id,
+      label: prefix,
+      models: nextModels.map((m) => `${prefix}-${m}`),
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
+/**
+ * DELETE /api/accounts/byok/:id - Delete a BYOK provider group and all keys in it.
+ */
+accountsRouter.delete("/byok/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const account = await db.select().from(accounts).where(eq(accounts.id, id)).get();
+
+  if (!account || account.provider !== "byok") {
+    return c.json({ error: "BYOK provider not found" }, 404);
+  }
+
+  const prefix = getByokPrefix(account);
+  const allByok = await db.select().from(accounts).where(eq(accounts.provider, "byok"));
+  const groupAccounts = allByok.filter((acc) => getByokPrefix(acc) === prefix);
+  const deletedIds: number[] = [];
+
+  for (const acc of groupAccounts) {
+    await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, acc.id));
+    const result = await db.delete(accounts).where(eq(accounts.id, acc.id)).returning();
+    if (result[0]) deletedIds.push(result[0].id);
+  }
+
+  await refreshByokRuntime();
+  broadcast({ type: "byok_deleted", data: { id, label: prefix, deletedIds } });
+
+  return c.json({ success: true, deleted: id, deletedIds, label: prefix });
+});
+
+/**
+ * Helper: Auto-fix account if in error state after successful test
+ */
+async function autoFixAccountIfError(accountId: number, accountStatus: string) {
+  if (accountStatus === 'error') {
+    await db.update(accounts)
+      .set({
+        status: 'active',
+        errorMessage: null,
+        updatedAt: new Date()
+      })
+      .where(eq(accounts.id, accountId));
+    pool.invalidate('byok');
+    const { refreshByokModels } = await import("../proxy/providers/registry");
+    await refreshByokModels();
+    broadcast({
+      type: 'account_status',
+      data: { id: accountId, status: 'active' }
+    });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * POST /api/accounts/byok/:id/test - Test BYOK connection
+ * Accepts optional { model?: string } body to test a specific model.
+ * Returns latency_ms and auto_fixed status.
+ */
+accountsRouter.post("/byok/:id/test", async (c) => {
+  const id = Number(c.req.param("id"));
+  const reqBody = await c.req.json().catch(() => ({})) as { model?: string };
+
+  const account = await db.select().from(accounts)
+    .where(eq(accounts.id, id))
+    .get();
+
+  if (!account || account.provider !== "byok") {
+    return c.json({ error: "BYOK provider not found" }, 404);
+  }
+
+  const tokens = typeof account.tokens === "string"
+    ? JSON.parse(account.tokens)
+    : account.tokens;
+
+  if (!tokens?.base_url || !tokens?.models || tokens.models.length === 0) {
+    return c.json({ success: false, error: "Invalid BYOK configuration" });
+  }
+
+  const apiKey = decrypt(account.password);
+  const format = tokens.format || "auto";
+  const testModel = reqBody.model || tokens.models[0];
+
+  // Validate model if provided
+  if (reqBody.model && !tokens.models.includes(reqBody.model)) {
+    return c.json({
+      success: false,
+      error: `Model "${reqBody.model}" not found in provider configuration`
+    }, 400);
+  }
+
+  // Determine endpoint based on format
+  const isAnthropic = format === "anthropic" ||
+    (format === "auto" && (tokens.base_url.includes("anthropic.com") || tokens.base_url.includes("/v1/messages")));
+
+  const url = isAnthropic
+    ? `${tokens.base_url}/messages`
+    : `${tokens.base_url}/chat/completions`;
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(tokens.headers || {}),
+  };
+
+  const body = isAnthropic
+    ? {
+        model: testModel,
+        messages: [{ role: "user", content: "Hi" }],
+        max_tokens: 1,
+      }
+    : {
+        model: testModel,
+        messages: [{ role: "user", content: "Hi" }],
+        max_tokens: 1,
+      };
+
+  if (isAnthropic) {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  } else {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+
+  try {
+    const startTime = Date.now();
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+    const latencyMs = Date.now() - startTime;
+
+    if (response.status === 401 || response.status === 403) {
+      return c.json({ success: false, error: "Authentication failed", latency_ms: latencyMs });
+    }
+
+    if (response.status === 429) {
+      const autoFixed = await autoFixAccountIfError(id, account.status);
+      return c.json({
+        success: true,
+        warning: "Rate limited but authentication works",
+        latency_ms: latencyMs,
+        auto_fixed: autoFixed
+      });
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      return c.json({ success: false, error: `HTTP ${response.status}: ${text.slice(0, 200)}`, latency_ms: latencyMs });
+    }
+
+    const autoFixed = await autoFixAccountIfError(id, account.status);
+    return c.json({
+      success: true,
+      message: "Connection test passed",
+      model: testModel,
+      format: isAnthropic ? "anthropic" : "openai",
+      latency_ms: latencyMs,
+      auto_fixed: autoFixed
+    });
+  } catch (error) {
+    return c.json({
+      success: false,
+      error: error instanceof Error ? error.message : "Network error",
+    });
+  }
+});
+/**
+ * GET /api/accounts/:id - Get single account
+ */
+accountsRouter.get("/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const [account] = await db
+    .select()
+    .from(accounts)
+    .where(eq(accounts.id, id));
+
+  if (!account) {
+    return c.json({ error: "Account not found" }, 404);
+  }
+
+  return c.json({
+    ...account,
+    password: "***",
+    tokens: account.tokens ? "[set]" : null,
+  });
+});
+
+/**
+ * POST /api/accounts - Create new account
+ */
+accountsRouter.post("/", async (c) => {
+  const body = await c.req.json<{
+    provider: "kiro" | "kiro-pro" | "codex" | "qoder";
+    email?: string;
+    password?: string;
+    personalToken?: string;
+    tokens?: Record<string, unknown>;
+    status?: "active" | "pending";
+  }>();
+
+  if (!body.provider) {
+    return c.json({ error: "provider is required" }, 400);
+  }
+
+  if (body.provider === "qoder" && body.personalToken) {
+    const trimmed = body.personalToken.trim();
+    if (!trimmed) return c.json({ error: "personalToken is empty" }, 400);
+
+    try {
+      const { tokens, jobToken } = await activateQoderPat(trimmed);
+      const email = jobToken.email || jobToken.name || `qoder-${tokens.userId || Date.now()}@pat`;
+
+      const existing = await db.select().from(accounts)
+        .where(eq(accounts.email, email))
+        .then((rows) => rows.find((r) => r.provider === "qoder"));
+
+      if (existing) {
+        await db.update(accounts).set({
+          status: "active",
+          tokens: tokens as unknown,
+          errorMessage: null,
+          lastLoginAt: new Date(),
+          updatedAt: new Date(),
+        }).where(eq(accounts.id, existing.id));
+        pool.invalidate("qoder");
+        broadcast({ type: "account_updated", data: { id: existing.id, provider: "qoder", status: "active" } });
+        return c.json({ id: existing.id, provider: "qoder", email, status: "active", updated: true }, 200);
+      }
+
+      const inserted = await db.insert(accounts).values({
+        provider: "qoder",
+        email,
+        password: encrypt("pat-login"),
+        status: "active",
+        tokens: tokens as unknown,
+        lastLoginAt: new Date(),
+      }).returning();
+      const created = inserted[0]!;
+      pool.invalidate("qoder");
+      broadcast({ type: "account_created", data: { id: created.id, provider: "qoder", email } });
+      return c.json({ ...created, password: "***", tokens: "[set]" }, 201);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return c.json({ error: `Qoder PAT activation failed: ${msg}` }, 400);
+    }
+  }
+
+  if (!body.email || !body.password) {
+    return c.json(
+      { error: "email and password are required" },
+      400
+    );
+  }
+
+  const encryptedPassword = encrypt(body.password);
+
+  const newAccount: NewAccount = {
+    provider: body.provider,
+    email: body.email,
+    password: encryptedPassword,
+    status: body.tokens ? "active" : (body.status || "pending"),
+    tokens: body.tokens || null,
+  };
+
+  try {
+    const result = await db.insert(accounts).values(newAccount).returning();
+    const created = result[0]!;
+    pool.invalidate(created.provider as ProviderName);
+
+    broadcast({
+      type: "account_created",
+      data: { id: created.id, provider: created.provider, email: created.email },
+    });
+
+    return c.json(
+      { ...created, password: "***", tokens: created.tokens ? "[set]" : null },
+      201
+    );
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes("unique") || error.message.includes("duplicate"))
+    ) {
+      return c.json({ error: "Account with this email already exists for this provider" }, 409);
+    }
+    throw error;
+  }
+});
+
+/**
+ * POST /api/accounts/instant-login - Instant login via refresh token (bulk)
+ * No browser needed — just exchange refresh token for access token
+ * Body: { tokens: ["refreshToken1", ...], provider?: "kiro-pro" | "codex" }
+ *
+ * - kiro-pro (default): tokens are Kiro AWS Identity refresh tokens
+ * - codex: tokens are OpenAI OAuth refresh tokens (start with rt_*, ~200 chars)
+ */
+accountsRouter.post("/instant-login", async (c) => {
+  const body = await c.req.json<{ tokens: string[]; provider?: "kiro-pro" | "codex" }>();
+  const provider = body.provider || "kiro-pro";
+
+  if (!body.tokens || !Array.isArray(body.tokens) || body.tokens.length === 0) {
+    return c.json({ error: "tokens array is required (array of refresh token strings)" }, 400);
+  }
+
+  if (provider === "codex") {
+    return await handleCodexInstantLogin(c, body.tokens);
+  }
+
+  const REFRESH_URL = "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken";
+  const KIRO_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK";
+  let success = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const refreshToken of body.tokens) {
+    const trimmed = refreshToken.trim();
+    if (!trimmed) { failed++; continue; }
+
+    try {
+      const response = await fetch(REFRESH_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: trimmed }),
+      });
+
+      if (!response.ok) {
+        errors.push(`token ...${trimmed.slice(-8)}: refresh failed (${response.status})`);
+        failed++;
+        continue;
+      }
+
+      const data = await response.json() as {
+        accessToken?: string;
+        refreshToken?: string;
+        expiresAt?: string;
+      };
+
+      if (!data.accessToken) {
+        errors.push(`token ...${trimmed.slice(-8)}: no access token received`);
+        failed++;
+        continue;
+      }
+
+      // Generate email identifier from token (Kiro tokens are not JWT, can't extract email)
+      // Use a hash of the refresh token as unique identifier
+      const tokenHash = trimmed.slice(10, 18);
+      let email = `kiro-${tokenHash}@token.local`;
+
+      const tokens = {
+        access_token: data.accessToken,
+        refresh_token: data.refreshToken || trimmed,
+        expires_at: data.expiresAt || null,
+        profile_arn: KIRO_PROFILE_ARN,
+      };
+
+      // Create or update account as active with tokens
+      const existing = await db.select().from(accounts)
+        .where(eq(accounts.email, email))
+        .then((rows) => rows.find((r) => r.provider === "kiro-pro"));
+
+      if (existing) {
+        await db.update(accounts).set({
+          status: "active",
+          tokens: tokens as unknown,
+          errorMessage: null,
+          lastLoginAt: new Date(),
+          updatedAt: new Date(),
+        }).where(eq(accounts.id, existing.id));
+      } else {
+        await db.insert(accounts).values({
+          provider: "kiro-pro",
+          email,
+          password: encrypt("instant-login"),
+          status: "active",
+          tokens: tokens as unknown,
+          lastLoginAt: new Date(),
+        });
+      }
+      success++;
+    } catch (err) {
+      errors.push(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+      failed++;
+    }
+  }
+
+  pool.invalidate("kiro-pro" as ProviderName);
+  if (success > 0) {
+    broadcast({ type: "accounts_updated", data: { provider: "kiro-pro", count: success } });
+  }
+
+  return c.json({ success, failed, errors: errors.length > 0 ? errors : undefined });
+});
+
+/**
+ * POST /api/accounts/bulk - Create multiple accounts
+ */
+accountsRouter.post("/bulk", async (c) => {
+  const body = await c.req.json<{
+    accounts: Array<{
+      provider: "kiro" | "kiro-pro" | "codex";
+      email: string;
+      password: string;
+    }>;
+  }>();
+
+  if (!body.accounts || !Array.isArray(body.accounts)) {
+    return c.json({ error: "accounts array is required" }, 400);
+  }
+
+  const results: Array<{ email: string; success: boolean; error?: string }> = [];
+
+  for (const acc of body.accounts) {
+    try {
+      await db.insert(accounts).values({
+        provider: acc.provider,
+        email: acc.email,
+        password: encrypt(acc.password),
+        status: "pending",
+      });
+      results.push({ email: acc.email, success: true });
+    } catch (error) {
+      results.push({
+        email: acc.email,
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  pool.invalidate();
+  broadcast({ type: "accounts_bulk_created", data: { count: results.filter((r) => r.success).length } });
+
+  return c.json({
+    total: body.accounts.length,
+    success: results.filter((r) => r.success).length,
+    failed: results.filter((r) => !r.success).length,
+    results,
+  });
+});
+
+/**
+ * PATCH /api/accounts/:id - Update account
+ */
+accountsRouter.patch("/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<Partial<{
+    status: "active" | "exhausted" | "error" | "pending";
+    enabled: boolean;
+    tokens: Record<string, unknown>;
+    password: string;
+    quotaLimit: number;
+    quotaRemaining: number;
+    quotaResetAt: string;
+    errorMessage: string | null;
+  }>>();
+
+  const updateData: Record<string, unknown> = {
+    updatedAt: new Date(),
+  };
+
+  if (body.status) updateData.status = body.status;
+  if (typeof body.enabled === "boolean") updateData.enabled = body.enabled;
+  if (body.tokens) updateData.tokens = body.tokens;
+  if (body.password) updateData.password = encrypt(body.password);
+  if (body.quotaLimit !== undefined) updateData.quotaLimit = body.quotaLimit;
+  if (body.quotaRemaining !== undefined) updateData.quotaRemaining = body.quotaRemaining;
+  if (body.quotaResetAt) updateData.quotaResetAt = new Date(body.quotaResetAt);
+  if (body.errorMessage !== undefined) updateData.errorMessage = body.errorMessage;
+
+  const result = await db
+    .update(accounts)
+    .set(updateData)
+    .where(eq(accounts.id, id))
+    .returning();
+
+  if (result.length === 0) {
+    return c.json({ error: "Account not found" }, 404);
+  }
+
+  const updated = result[0]!;
+  pool.invalidate(updated.provider as ProviderName);
+  broadcast({
+    type: "account_updated",
+    data: { id: updated.id, status: updated.status, enabled: updated.enabled, provider: updated.provider },
+  });
+
+  return c.json({ ...updated, password: "***", tokens: updated.tokens ? "[set]" : null });
+});
+
+/**
+ * POST /api/accounts/:id/toggle - Toggle account enabled flag
+ */
+accountsRouter.post("/:id/toggle", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ enabled?: boolean }>().catch(() => ({} as { enabled?: boolean }));
+
+  const [current] = await db
+    .select({ enabled: accounts.enabled })
+    .from(accounts)
+    .where(eq(accounts.id, id));
+
+  if (!current) {
+    return c.json({ error: "Account not found" }, 404);
+  }
+
+  const next = typeof body.enabled === "boolean" ? body.enabled : !current.enabled;
+  const updated = await pool.setEnabled(id, next);
+
+  if (!updated) {
+    return c.json({ error: "Account not found" }, 404);
+  }
+
+  return c.json({
+    id: updated.id,
+    enabled: updated.enabled,
+    status: updated.status,
+    provider: updated.provider,
+  });
+});
+
+/**
+ * POST /api/accounts/toggle-all - Bulk toggle enabled for all accounts of a provider
+ * Body: { provider: string, enabled: boolean }
+ */
+accountsRouter.post("/toggle-all", async (c) => {
+  const body = await c.req.json<{ provider: string; enabled: boolean }>();
+
+  if (!body.provider) {
+    return c.json({ error: "provider is required" }, 400);
+  }
+  if (typeof body.enabled !== "boolean") {
+    return c.json({ error: "enabled (boolean) is required" }, 400);
+  }
+
+  const count = await pool.setEnabledByProvider(body.provider as ProviderName, body.enabled);
+  return c.json({ provider: body.provider, enabled: body.enabled, count });
+});
+
+/**
+ * POST /api/accounts/bulk-delete - Delete multiple accounts at once.
+ *
+ * Works for every provider (the row shape is identical). Defined BEFORE the
+ * dynamic `/:id` route so Hono matches the literal path first.
+ *
+ * Body: { ids: number[] }
+ * Returns: { success, requested, deleted, providers, notFound }
+ */
+accountsRouter.post("/bulk-delete", async (c) => {
+  const body = await c.req.json<{ ids?: Array<number | string> }>().catch(() => ({} as { ids?: Array<number | string> }));
+
+  // Coerce + dedupe + drop anything non-numeric so a malformed entry can't
+  // widen the delete (e.g. NaN turning into "delete everything").
+  const ids = Array.from(
+    new Set(
+      (body.ids ?? [])
+        .map((v) => Number(v))
+        .filter((n) => Number.isInteger(n) && n > 0),
+    ),
+  );
+
+  if (ids.length === 0) {
+    return c.json({ error: "ids must be a non-empty array of account ids" }, 400);
+  }
+
+  // Resolve providers up front so we can invalidate exactly the affected pools.
+  const targets = await db
+    .select({ id: accounts.id, provider: accounts.provider })
+    .from(accounts)
+    .where(inArray(accounts.id, ids));
+
+  if (targets.length === 0) {
+    return c.json({ error: "No matching accounts found" }, 404);
+  }
+
+  const foundIds = targets.map((t) => t.id);
+  const providersAffected = Array.from(new Set(targets.map((t) => t.provider)));
+
+  // Nullify / clean foreign keys before the delete (mirrors DELETE /:id).
+  await db.update(requestLogs).set({ accountId: null }).where(inArray(requestLogs.accountId, foundIds));
+
+  const result = await db.delete(accounts).where(inArray(accounts.id, foundIds)).returning();
+  const deletedIds = result.map((r) => r.id);
+
+  for (const provider of providersAffected) {
+    pool.invalidate(provider as ProviderName);
+  }
+  // Mirror single-delete's broadcast shape per id so existing dashboard
+  // listeners (`account_deleted`) keep working without changes, then send
+  // one summary frame for clients that prefer the bulk signal.
+  for (const id of deletedIds) {
+    broadcast({ type: "account_deleted", data: { id } });
+  }
+  broadcast({ type: "accounts_deleted", data: { ids: deletedIds, providers: providersAffected } });
+
+  const notFound = ids.filter((id) => !foundIds.includes(id));
+  return c.json({
+    success: true,
+    requested: ids.length,
+    deleted: deletedIds.length,
+    deletedIds,
+    providers: providersAffected,
+    notFound,
+  });
+});
+
+/**
+ * DELETE /api/accounts/:id - Delete account
+ */
+accountsRouter.delete("/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+
+  // Nullify foreign key references before deleting
+  await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, id));
+
+  const result = await db
+    .delete(accounts)
+    .where(eq(accounts.id, id))
+    .returning();
+
+  if (result.length === 0) {
+    return c.json({ error: "Account not found" }, 404);
+  }
+
+  const deleted = result[0]!;
+  pool.invalidate(deleted.provider as ProviderName);
+  broadcast({ type: "account_deleted", data: { id } });
+
+  return c.json({ success: true, deleted: id });
+});
+
+const CODEX_ISSUER = "https://auth.openai.com";
+const CODEX_TOKEN_URL = `${CODEX_ISSUER}/oauth/token`;
+const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_SCOPE = "openid profile email offline_access";
+
+export function decodeJwtPayload(token: string): Record<string, any> {
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) return {};
+    const padded = parts[1]! + "=".repeat((4 - parts[1]!.length % 4) % 4);
+    const json = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+    return JSON.parse(json);
+  } catch {
+    return {};
+  }
+}
+
+async function upsertCodexAccount(email: string, tokens: Record<string, unknown>) {
+  const existing = await db.select().from(accounts)
+    .where(eq(accounts.email, email))
+    .then((rows) => rows.find((r) => r.provider === "codex"));
+
+  if (existing) {
+    await db.update(accounts).set({
+      status: "active",
+      tokens: tokens as unknown,
+      errorMessage: null,
+      lastLoginAt: new Date(),
+      updatedAt: new Date(),
+    }).where(eq(accounts.id, existing.id));
+    return existing.id;
+  }
+
+  const inserted = await db.insert(accounts).values({
+    provider: "codex",
+    email,
+    password: encrypt("instant-login"),
+    status: "active",
+    tokens: tokens as unknown,
+    lastLoginAt: new Date(),
+  }).returning();
+
+  return inserted[0]!.id;
+}
+
+export async function importCodexAccessToken(accessToken: string, name?: string) {
+  const token = accessToken.trim();
+  if (!token) {
+    throw new Error("Access token is required");
+  }
+
+  const claims = decodeJwtPayload(token);
+  const authClaim = claims["https://api.openai.com/auth"];
+  const profileClaim = claims["https://api.openai.com/profile"];
+
+  let email = String(profileClaim?.email || claims.email || claims.preferred_username || "");
+  let accountId = String(
+    authClaim?.chatgpt_account_id || authClaim?.account_id || authClaim?.user_id || claims.chatgpt_account_id || claims.account_id || ""
+  );
+  const planType = String(authClaim?.chatgpt_plan_type || claims.plan_type || "");
+  const jwtExp = claims.exp ? Number(claims.exp) : null;
+
+  if (!email || !accountId) {
+    try {
+      const usageResp = await fetch(CODEX_USAGE_URL, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "codex_cli_rs/0.1.0",
+        },
+      });
+      if (usageResp.ok) {
+        const usage = await usageResp.json() as any;
+        if (!email) email = String(usage.email || "");
+        if (!accountId) accountId = String(usage.account_id || usage.chatgpt_account_id || "");
+      }
+    } catch {}
+  }
+
+  if (!email) {
+    email = name?.trim() || `codex-${token.slice(-8)}@token.local`;
+  }
+
+  const newTokens = {
+    access_token: token,
+    refresh_token: "",
+    id_token: "",
+    expires_at: jwtExp ? String(jwtExp) : "",
+    email,
+    account_id: accountId,
+    method: "access_token",
+    plan_type: planType,
+  };
+
+  const id = await upsertCodexAccount(email, newTokens);
+  pool.invalidate("codex" as ProviderName);
+  broadcast({ type: "accounts_updated", data: { provider: "codex", count: 1 } });
+
+  return {
+    id,
+    provider: "codex",
+    email,
+    name: name?.trim() || email,
+    workspace: accountId || null,
+    plan: planType || null,
+  };
+}
+
+export async function exchangeCodexAuthorizationCode(input: {
+  code: string;
+  codeVerifier: string;
+  redirectUri: string;
+}) {
+  const form = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: input.code,
+    redirect_uri: input.redirectUri,
+    client_id: CODEX_CLIENT_ID,
+    code_verifier: input.codeVerifier,
+  });
+
+  const response = await fetch(CODEX_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: form.toString(),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Codex token exchange failed (${response.status}): ${text.slice(0, 200)}`);
+  }
+
+  const data = await response.json() as {
+    access_token?: string;
+    refresh_token?: string;
+    id_token?: string;
+    expires_in?: number;
+  };
+
+  if (!data.access_token) {
+    throw new Error("Codex token exchange returned no access_token");
+  }
+
+  const claims = data.id_token ? decodeJwtPayload(data.id_token) : {};
+  let email = String(claims.email || "");
+  let accountId = "";
+  const authClaim = claims["https://api.openai.com/auth"];
+  const profileClaim = claims["https://api.openai.com/profile"];
+  const planType = String(authClaim?.chatgpt_plan_type || claims.plan_type || "");
+
+  if (profileClaim && typeof profileClaim === "object") {
+    email = String(profileClaim.email || email || "");
+  }
+
+  if (authClaim && typeof authClaim === "object") {
+    accountId = String(
+      authClaim.chatgpt_account_id || authClaim.account_id || authClaim.user_id || ""
+    );
+  }
+  if (!accountId) {
+    accountId = String(claims.chatgpt_account_id || claims.account_id || "");
+  }
+
+  if (!email || !accountId) {
+    try {
+      const usageResp = await fetch(CODEX_USAGE_URL, {
+        headers: {
+          Authorization: `Bearer ${data.access_token}`,
+          "User-Agent": "codex_cli_rs/0.1.0",
+        },
+      });
+      if (usageResp.ok) {
+        const usage = await usageResp.json() as any;
+        if (!email) email = String(usage.email || "");
+        if (!accountId) accountId = String(usage.account_id || usage.chatgpt_account_id || "");
+      }
+    } catch {}
+  }
+
+  if (!email) {
+    email = `codex-${input.code.slice(-8)}@oauth.local`;
+  }
+
+  const expiresIn = Number(data.expires_in) || 3600;
+  const expiresAt = String(Math.floor(Date.now() / 1000) + expiresIn);
+  const newTokens = {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token || "",
+    id_token: data.id_token || "",
+    expires_at: expiresAt,
+    email,
+    account_id: accountId,
+    method: "authorization_code",
+    plan_type: planType,
+  };
+
+  const id = await upsertCodexAccount(email, newTokens);
+  pool.invalidate("codex" as ProviderName);
+  broadcast({ type: "accounts_updated", data: { provider: "codex", count: 1 } });
+
+  return {
+    id,
+    provider: "codex",
+    email,
+    name: email,
+    workspace: accountId || null,
+    plan: planType || null,
+  };
+}
+
+export async function exchangeCodexRefreshTokens(tokens: string[]) {
+  let success = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const refreshToken of tokens) {
+    const trimmed = refreshToken.trim();
+    if (!trimmed) { failed++; continue; }
+
+    try {
+      const form = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: trimmed,
+        client_id: CODEX_CLIENT_ID,
+        scope: CODEX_SCOPE,
+      });
+
+      const response = await fetch(CODEX_TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: form.toString(),
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        errors.push(`token ...${trimmed.slice(-8)}: refresh failed (${response.status}): ${text.slice(0, 100)}`);
+        failed++;
+        continue;
+      }
+
+      const data = await response.json() as {
+        access_token?: string;
+        refresh_token?: string;
+        id_token?: string;
+        expires_in?: number;
+      };
+
+      if (!data.access_token) {
+        errors.push(`token ...${trimmed.slice(-8)}: no access_token in response`);
+        failed++;
+        continue;
+      }
+
+      const claims = data.id_token ? decodeJwtPayload(data.id_token) : {};
+      let email = String(claims.email || "");
+      let accountId = "";
+      const authClaim = claims["https://api.openai.com/auth"];
+      if (authClaim && typeof authClaim === "object") {
+        accountId = String(
+          authClaim.chatgpt_account_id || authClaim.account_id || authClaim.user_id || ""
+        );
+      }
+      if (!accountId) {
+        accountId = String(claims.chatgpt_account_id || claims.account_id || "");
+      }
+
+      if (!email || !accountId) {
+        try {
+          const usageResp = await fetch(CODEX_USAGE_URL, {
+            headers: {
+              "Authorization": `Bearer ${data.access_token}`,
+              "User-Agent": "codex_cli_rs/0.1.0",
+            },
+          });
+          if (usageResp.ok) {
+            const usage = await usageResp.json() as any;
+            if (!email) email = usage.email || "";
+            if (!accountId) {
+              accountId = String(usage.account_id || usage.chatgpt_account_id || "");
+            }
+          }
+        } catch {}
+      }
+
+      if (!email) email = `codex-${trimmed.slice(-8)}@token.local`;
+
+      const expiresIn = Number(data.expires_in) || 3600;
+      const expiresAt = String(Math.floor(Date.now() / 1000) + expiresIn);
+
+      const newTokens = {
+        access_token: data.access_token,
+        refresh_token: data.refresh_token || trimmed,
+        id_token: data.id_token || "",
+        expires_at: expiresAt,
+        email,
+        account_id: accountId,
+        method: "refresh_token",
+      };
+
+      await upsertCodexAccount(email, newTokens);
+      success++;
+    } catch (err) {
+      errors.push(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+      failed++;
+    }
+  }
+
+  pool.invalidate("codex" as ProviderName);
+  if (success > 0) {
+    broadcast({ type: "accounts_updated", data: { provider: "codex", count: success } });
+  }
+
+  return { success, failed, errors: errors.length > 0 ? errors : undefined };
+}
+
+async function handleCodexInstantLogin(c: any, tokens: string[]) {
+  const result = await exchangeCodexRefreshTokens(tokens);
+  return c.json(result);
+}
+
+/**
+ * BYOK (Bring Your Own Key) Management Endpoints
+ */
+
+/**
+ * POST /api/accounts/byok - Create BYOK provider
+ */
+accountsRouter.post("/byok", async (c) => {
+  const body = await c.req.json<{
+    label: string;
+    base_url: string;
+    api_key: string;
+    format?: "openai" | "anthropic" | "auto";
+    models: string[];
+    headers?: Record<string, string>;
+  }>();
+
+  if (!body.label || !body.base_url || !body.api_key || !body.models || body.models.length === 0) {
+    return c.json({ error: "label, base_url, api_key, and models[] are required" }, 400);
+  }
+
+  // Validate label format (lowercase alphanumeric + hyphens)
+  if (!/^[a-z0-9-]+$/.test(body.label)) {
+    return c.json({ error: "label must be lowercase alphanumeric with hyphens only" }, 400);
+  }
+
+  // Check uniqueness
+  const existing = await db.select().from(accounts)
+    .where(eq(accounts.email, body.label))
+    .then((rows) => rows.find((r) => r.provider === "byok"));
+
+  if (existing) {
+    return c.json({ error: "BYOK provider with this label already exists" }, 409);
+  }
+
+  // Encrypt API key
+  const encryptedKey = encrypt(body.api_key);
+
+  // Build tokens JSON
+  const tokens = {
+    base_url: body.base_url,
+    format: body.format || "auto",
+    models: body.models,
+    model_prefix: body.label,
+    headers: body.headers || {},
+  };
+
+  try {
+    const result = await db.insert(accounts).values({
+      provider: "byok",
+      email: body.label,
+      password: encryptedKey,
+      status: "active",
+      enabled: true,
+      tokens: tokens,
+      quotaLimit: -1,
+      quotaRemaining: -1,
+    }).returning();
+
+    const created = result[0]!;
+    pool.invalidate("byok" as ProviderName);
+
+    broadcast({
+      type: "byok_created",
+      data: { id: created.id, label: body.label },
+    });
+
+    // Refresh BYOK model cache
+    const { refreshByokModels } = await import("../proxy/providers/registry");
+    await refreshByokModels();
+
+    return c.json({
+      success: true,
+      id: created.id,
+      label: body.label,
+      models: body.models.map((m) => `${body.label}-${m}`),
+    }, 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
+/**
+ * GET /api/accounts/byok - List all BYOK providers
+ */
+accountsRouter.get("/byok", async (c) => {
+  const byokAccounts = await db.select().from(accounts)
+    .where(eq(accounts.provider, "byok"));
+
+  const providers = byokAccounts.map((acc) => {
+    const tokens = typeof acc.tokens === "string"
+      ? JSON.parse(acc.tokens)
+      : acc.tokens;
+
+    return {
+      id: acc.id,
+      label: acc.email,
+      base_url: tokens?.base_url || "",
+      format: tokens?.format || "auto",
+      models: tokens?.models || [],
+      model_prefix: tokens?.model_prefix || acc.email,
+      status: acc.status,
+      enabled: acc.enabled,
+      available_models: (tokens?.models || []).map((m: string) => `${tokens?.model_prefix || acc.email}-${m}`),
+    };
+  });
+
+  return c.json({ providers, total: providers.length });
+});
+
+/**
+ * PATCH /api/accounts/byok/:id - Update BYOK provider
+ */
+accountsRouter.patch("/byok/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    base_url?: string;
+    api_key?: string;
+    format?: "openai" | "anthropic" | "auto";
+    models?: string[];
+    headers?: Record<string, string>;
+  }>();
+
+  const account = await db.select().from(accounts)
+    .where(eq(accounts.id, id))
+    .get();
+
+  if (!account || account.provider !== "byok") {
+    return c.json({ error: "BYOK provider not found" }, 404);
+  }
+
+  const tokens = typeof account.tokens === "string"
+    ? JSON.parse(account.tokens)
+    : account.tokens || {};
+
+  // Update fields
+  if (body.base_url) tokens.base_url = body.base_url;
+  if (body.format) tokens.format = body.format;
+  if (body.models) tokens.models = body.models;
+  if (body.headers) tokens.headers = body.headers;
+
+  const updateData: Record<string, unknown> = {
+    tokens: tokens,
+    updatedAt: new Date(),
+  };
+
+  if (body.api_key) {
+    updateData.password = encrypt(body.api_key);
+  }
+
+  await db.update(accounts)
+    .set(updateData)
+    .where(eq(accounts.id, id));
+
+  pool.invalidate("byok" as ProviderName);
+
+  broadcast({
+    type: "byok_updated",
+    data: { id },
+  });
+
+  // Refresh BYOK model cache
+  const { refreshByokModels } = await import("../proxy/providers/registry");
+  await refreshByokModels();
+
+  return c.json({
+    success: true,
+    id,
+    label: account.email,
+    models: (tokens.models || []).map((m: string) => `${tokens.model_prefix || account.email}-${m}`),
+  });
+});
+
+/**
+ * DELETE /api/accounts/byok/:id - Delete BYOK provider
+ */
+accountsRouter.delete("/byok/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+
+  // Nullify foreign key references
+  await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, id));
+
+  const result = await db.delete(accounts)
+    .where(eq(accounts.id, id))
+    .returning();
+
+  if (result.length === 0) {
+    return c.json({ error: "BYOK provider not found" }, 404);
+  }
+
+  pool.invalidate("byok" as ProviderName);
+
+  broadcast({
+    type: "byok_deleted",
+    data: { id },
+  });
+
+  // Refresh BYOK model cache
+  const { refreshByokModels } = await import("../proxy/providers/registry");
+  await refreshByokModels();
+
+  return c.json({ success: true, deleted: id });
+});
