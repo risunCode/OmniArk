@@ -212,7 +212,7 @@ switch ($Command.ToLower()) {
     Write-Host "  update            Pull, install, build, restart"
     Write-Host ""
     Write-Host "Common workflows:"
-    Write-Host "  First time:       irm bun.sh/install.ps1 | iex; .\install.ps1; omniark start"
+    Write-Host "  First time:       bun install.ts; omniark start"
     Write-Host "  After update:     omniark update"
     Write-Host "  Something broke:  omniark doctor; omniark logs 50"
   }
