@@ -125,12 +125,12 @@ export class QoderProvider extends BaseProvider {
           try {
             const chunk = JSON.parse(line.slice(6));
             // Extract usage from final chunk (has empty choices array)
-            if (chunk.usage && chunk.usage.total_tokens > 0) {
+            if (chunk.usage) {
               finalUsage = {
-                prompt_tokens: Number(chunk.usage.prompt_tokens) || 0,
-                completion_tokens: Number(chunk.usage.completion_tokens) || 0,
-                total_tokens: Number(chunk.usage.total_tokens) || 0,
-                cached_tokens: Number(chunk.usage.cached_tokens || chunk.usage.cache_read_input_tokens || chunk.usage.prompt_cache_hit_tokens || chunk.usage.prompt_tokens_details?.cached_tokens || 0),
+                prompt_tokens: Number(chunk.usage.prompt_tokens) || finalUsage.prompt_tokens,
+                completion_tokens: Number(chunk.usage.completion_tokens) || finalUsage.completion_tokens,
+                total_tokens: Number(chunk.usage.total_tokens) || finalUsage.total_tokens,
+                cached_tokens: Math.max(finalUsage.cached_tokens, Number(chunk.usage.cached_tokens || chunk.usage.cache_read_input_tokens || chunk.usage.prompt_cache_hit_tokens || chunk.usage.cached_input_tokens || chunk.usage.prompt_tokens_details?.cached_tokens || chunk.usage.input_tokens_details?.cached_tokens || 0)),
               };
             }
             const delta = chunk.choices?.[0]?.delta;
@@ -353,8 +353,10 @@ export class QoderProvider extends BaseProvider {
               // Track usage from upstream (usually in final chunk)
               if (parsedDelta.usage) {
                 accumulatedUsage = {
-                  ...parsedDelta.usage,
-                  cached_tokens: parsedDelta.usage.cached_tokens || 0,
+                  prompt_tokens: parsedDelta.usage.prompt_tokens || accumulatedUsage.prompt_tokens,
+                  completion_tokens: parsedDelta.usage.completion_tokens || accumulatedUsage.completion_tokens,
+                  total_tokens: parsedDelta.usage.total_tokens || accumulatedUsage.total_tokens,
+                  cached_tokens: Math.max(accumulatedUsage.cached_tokens, parsedDelta.usage.cached_tokens || 0),
                 };
               }
 

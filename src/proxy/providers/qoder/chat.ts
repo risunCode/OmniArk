@@ -494,6 +494,18 @@ export interface ParsedDelta {
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cached_tokens?: number };
 }
 
+function cachedTokensFromUsage(usage: Record<string, any>): number {
+  return Number(
+    usage.cached_tokens
+    || usage.cache_read_input_tokens
+    || usage.prompt_cache_hit_tokens
+    || usage.cached_input_tokens
+    || usage.prompt_tokens_details?.cached_tokens
+    || usage.input_tokens_details?.cached_tokens
+    || 0,
+  );
+}
+
 export function parseSseLine(line: string): ParsedDelta | null {
   if (!line.startsWith("data:")) return null;
   const data = line.slice(5).trim();
@@ -511,7 +523,7 @@ export function parseSseLine(line: string): ParsedDelta | null {
         prompt_tokens: Number(inner.usage.prompt_tokens) || 0,
         completion_tokens: Number(inner.usage.completion_tokens) || 0,
         total_tokens: Number(inner.usage.total_tokens) || 0,
-        cached_tokens: Number(inner.usage.cached_tokens || inner.usage.cache_read_input_tokens || inner.usage.prompt_cache_hit_tokens || inner.usage.prompt_tokens_details?.cached_tokens || 0),
+        cached_tokens: cachedTokensFromUsage(inner.usage),
       };
     }
 

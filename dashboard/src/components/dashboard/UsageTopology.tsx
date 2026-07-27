@@ -24,6 +24,11 @@ interface ProviderState {
   status: "success" | "error" | "idle";
 }
 
+interface InFlightRequest {
+  provider: string;
+  expiresAt: number;
+}
+
 const providerPalette: Record<string, { accent: string; soft: string; label: string }> = {
   codex: { accent: "#a99cff", soft: "#e3deff", label: "Codex" },
   qoder: { accent: "#75baff", soft: "#d7ebff", label: "Qoder" },
@@ -57,9 +62,7 @@ function providerMeta(provider: string) {
 }
 
 function edgePath(x: number, y: number) {
-  const controlX = (x + 500) / 2 + (x < 500 ? -44 : 44);
-  const controlY = (y + 300) / 2 + (y < 300 ? -28 : 28);
-  return `M 500 300 Q ${controlX} ${controlY} ${x} ${y}`;
+  return `M 500 300 L ${x} ${y}`;
 }
 
 export default function UsageTopology({ period }: UsageTopologyProps) {
@@ -67,6 +70,7 @@ export default function UsageTopology({ period }: UsageTopologyProps) {
   const [requests, setRequests] = useState<RequestItem[]>([]);
   const [availableProviders, setAvailableProviders] = useState<string[]>([]);
   const [providerState, setProviderState] = useState<Record<string, ProviderState>>({});
+  const [inFlightRequests, setInFlightRequests] = useState<Record<string, InFlightRequest>>({});
   const [now, setNow] = useState(Date.now());
 
   async function load() {
@@ -87,7 +91,11 @@ export default function UsageTopology({ period }: UsageTopologyProps) {
   }, [period]);
 
   useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    const interval = window.setInterval(() => {
+      const currentTime = Date.now();
+      setNow(currentTime);
+      setInFlightRequests((current) => Object.fromEntries(Object.entries(current).filter(([, request]) => request.expiresAt > currentTime)));
+    }, 1_000);
     return () => window.clearInterval(interval);
   }, []);
 
@@ -102,6 +110,19 @@ export default function UsageTopology({ period }: UsageTopologyProps) {
         },
       }));
     }
+    if (message.type === "request_started" && data.provider && data.id != null) {
+      setInFlightRequests((current) => ({
+        ...current,
+        [String(data.id)]: { provider: data.provider, expiresAt: Date.now() + 5 * 60_000 },
+      }));
+    }
+    if ((message.type === "request_log" || message.type === "request_error") && data.id != null) {
+      setInFlightRequests((current) => {
+        const next = { ...current };
+        delete next[String(data.id)];
+        return next;
+      });
+    }
     if (message.type === "request_log") {
       setRequests((current) => [data, ...current.filter((request) => request.id !== data.id)].slice(0, 20));
     }
@@ -115,6 +136,7 @@ export default function UsageTopology({ period }: UsageTopologyProps) {
   const totals = stats?.tokens || {};
   const totalRequests = Number(stats?.requests?.total || 0);
   const activeCount = providers.filter((provider) => providerState[provider]?.activeUntil > now).length;
+  const inFlightCount = Object.values(inFlightRequests).filter((request) => request.expiresAt > now).length;
 
   return (
     <div className="space-y-4">
@@ -130,7 +152,7 @@ export default function UsageTopology({ period }: UsageTopologyProps) {
         <Card className="min-h-[510px] overflow-hidden">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
             <div><p className="os-section-title">Live Routing Map</p><CardTitle className="mt-1 text-lg">Provider Traffic</CardTitle></div>
-            <div className="flex items-center gap-2 rounded-full border border-[var(--glass-border)] bg-[var(--glass-bg)] px-2.5 py-1 text-[11px] text-[var(--muted-foreground)]"><span className="relative flex h-2 w-2"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--info)] opacity-70" /><span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--info)]" /></span>{activeCount > 0 ? `${activeCount} in flight` : "Listening"}</div>
+            <div className="flex items-center gap-2 rounded-full border border-[var(--glass-border)] bg-[var(--glass-bg)] px-2.5 py-1 text-[11px] text-[var(--muted-foreground)]"><span className="relative flex h-2 w-2"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--info)] opacity-70" /><span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--info)]" /></span>{inFlightCount > 0 ? `${inFlightCount} in flight` : "Listening"}</div>
           </CardHeader>
           <CardContent className="h-[425px] p-3 pt-0 sm:p-4 sm:pt-0">
             <TopologyCanvas providers={providers} providerState={providerState} now={now} activeCount={activeCount} />
@@ -193,7 +215,6 @@ function TopologyCanvas({ providers, providerState, now, activeCount }: { provid
       </g>
     </svg>
     {providers.length === 0 && <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--muted-foreground)]">No active providers configured.</div>}
-    <div className="absolute bottom-3 left-3 flex items-center gap-3 rounded-xl border border-[var(--glass-border)] bg-[var(--glass-bg-strong)] px-3 py-2 text-[10px] text-[var(--muted-foreground)] backdrop-blur-xl"><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-[var(--success)]" /> Live flow</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-[var(--muted-foreground)]" /> Ready</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-[var(--error)]" /> Error</span></div>
   </div>;
 }
 
