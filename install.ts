@@ -149,7 +149,7 @@ async function installLinuxPackages(pkgs: string[], update = false): Promise<boo
     case "alpine":
       return runArgs(sudo(["apk", "add", "--no-cache", ...pkgs]));
     default:
-      err(`Install ${pkgs.join(" ")} manually for your distro and re-run.`);
+      console.error(`Install ${pkgs.join(" ")} manually for your distro and re-run.`);
       return false;
   }
 }

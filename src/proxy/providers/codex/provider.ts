@@ -4,9 +4,19 @@ import {
   type ChatCompletionResponse,
   type ModelInfo,
   type ProviderResult,
-} from "./base";
-import type { Account } from "../../db/schema";
-import { config } from "../../config";
+} from "../base";
+import type { Account } from "../../../db/schema";
+import { config } from "../../../config";
+import {
+  collectCompletedToolCalls,
+  convertCodexResponsesToOpenAIStream,
+  extractReasoningDelta,
+  extractReasoningItemText,
+  parseCodexResponsesSSE,
+  textFromReasoningPart,
+  type CodexStreamContext,
+  type PendingToolCall,
+} from "./stream";
 
 interface CodexTokens {
   access_token: string;
@@ -25,7 +35,7 @@ const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_SCOPE = "openid profile email offline_access";
 
 const codexModelMap: Record<string, string> = {
-  "codex-auto": "gpt-5.3-codex",
+  "codex-auto": "gpt-5.4-mini",
   "codex-gpt-5.5-xhigh": "gpt-5.5-xhigh",
   "gpt-5.5-xhigh": "gpt-5.5-xhigh",
   "codex-gpt-5.5": "gpt-5.5",
@@ -33,13 +43,6 @@ const codexModelMap: Record<string, string> = {
   "codex-gpt-5.3": "gpt-5.3-codex",
   "codex-gpt-5.2": "gpt-5.2",
 };
-
-interface PendingToolCall {
-  index: number;
-  id: string;
-  name: string;
-  arguments: string;
-}
 
 interface CodexReasoningConfig {
   effort?: string;
@@ -55,12 +58,12 @@ export class CodexProvider extends BaseProvider {
   }
 
   supportedModels: ModelInfo[] = [
-    { id: "codex-auto", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.5-xhigh", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.02 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.5", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.02 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.4", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.015 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.3", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.2", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.01 / 1000, creditSource: "estimated" },
+    { id: "codex-auto", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.5-xhigh", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.02 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.5", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.02 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.4", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.015 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.3", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.2", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.01 / 1000, creditSource: "estimated" },
   ];
 
   override getModelInfo(model: string): ModelInfo | undefined {
@@ -177,39 +180,6 @@ export class CodexProvider extends BaseProvider {
     return { ...(effort ? { effort } : {}), ...(summary ? { summary } : {}) };
   }
 
-  private textFromReasoningPart(part: any): string {
-    if (!part) return "";
-    if (typeof part === "string") return part;
-    if (typeof part.text === "string") return part.text;
-    if (typeof part.summary_text === "string") return part.summary_text;
-    if (typeof part.content === "string") return part.content;
-    if (Array.isArray(part.content)) {
-      return part.content.map((inner: any) => this.textFromReasoningPart(inner)).filter(Boolean).join("\n");
-    }
-    return "";
-  }
-
-  private extractReasoningItemText(item: any): string {
-    if (item?.type !== "reasoning") return "";
-    const parts = [item.summary, item.content, item.text, item.reasoning].flatMap((value) => {
-      if (Array.isArray(value)) return value;
-      return value == null ? [] : [value];
-    });
-    return parts.map((part) => this.textFromReasoningPart(part)).filter(Boolean).join("\n");
-  }
-
-  private extractReasoningDelta(event: any): string {
-    const type = event?.type || "";
-    if (
-      type === "response.reasoning_summary_text.delta" ||
-      type === "response.reasoning_text.delta" ||
-      type === "response.reasoning.delta"
-    ) {
-      return typeof event.delta === "string" ? event.delta : "";
-    }
-    return "";
-  }
-
   private buildPayload(request: ChatCompletionRequest): { instructions: string; input: unknown[] } {
     const systemParts: string[] = [];
     const items: unknown[] = [];
@@ -269,18 +239,6 @@ export class CodexProvider extends BaseProvider {
       }
     }
     return { instructions: systemParts.join("\n\n"), input: items };
-  }
-
-  private collectCompletedToolCalls(response: any, byIndex: Map<number, PendingToolCall>) {
-    for (const [index, item] of (response?.output || []).entries()) {
-      if (item?.type !== "function_call") continue;
-      byIndex.set(index, {
-        index,
-        id: item.call_id || item.id || `call_${index}`,
-        name: item.name || "",
-        arguments: item.arguments || "",
-      });
-    }
   }
 
   private toolCallsFromMap(byIndex: Map<number, PendingToolCall>) {
@@ -346,89 +304,17 @@ export class CodexProvider extends BaseProvider {
         return { success: false, error: `HTTP ${response.status}: ${text.slice(0, 200)}` };
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let text = "";
-      let reasoningText = "";
-      let inputTokens = 0;
-      let outputTokens = 0;
-      const toolCallsByIndex = new Map<number, PendingToolCall>();
-      const reasoningByOutput = new Map<number, string>();
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let idx;
-        while ((idx = buffer.indexOf("\n\n")) !== -1) {
-          const event = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
-
-          let dataLine = "";
-          for (const line of event.split("\n")) {
-            if (line.startsWith("data: ")) dataLine += line.slice(6);
-            else if (line.startsWith("data:")) dataLine += line.slice(5);
-          }
-          if (!dataLine || dataLine === "[DONE]") continue;
-
-          try {
-            const obj = JSON.parse(dataLine);
-            const t = obj.type || "";
-            const reasoningDelta = this.extractReasoningDelta(obj);
-            if (reasoningDelta) {
-              const index = Number(obj.output_index ?? 0);
-              reasoningByOutput.set(index, `${reasoningByOutput.get(index) || ""}${reasoningDelta}`);
-              reasoningText += reasoningDelta;
-            } else if (t === "response.reasoning_summary_text.done" || t === "response.reasoning_summary_part.done") {
-              const index = Number(obj.output_index ?? 0);
-              const doneText = typeof obj.text === "string" ? obj.text : this.textFromReasoningPart(obj.part);
-              if (doneText && !reasoningByOutput.get(index)) {
-                reasoningByOutput.set(index, doneText);
-                reasoningText += doneText;
-              }
-            } else if (t === "response.output_text.delta") {
-              text += obj.delta || "";
-            } else if (t === "response.output_item.added" || t === "response.output_item.done") {
-              const item = obj.item || {};
-              if (item.type === "reasoning") {
-                const index = Number(obj.output_index ?? 0);
-                const itemText = this.extractReasoningItemText(item);
-                if (itemText && !reasoningByOutput.get(index)) {
-                  reasoningByOutput.set(index, itemText);
-                  reasoningText += itemText;
-                }
-              } else if (item.type === "function_call") {
-                const index = Number(obj.output_index ?? toolCallsByIndex.size);
-                toolCallsByIndex.set(index, {
-                  index,
-                  id: item.call_id || item.id || `call_${index}`,
-                  name: item.name || "",
-                  arguments: item.arguments || toolCallsByIndex.get(index)?.arguments || "",
-                });
-              }
-            } else if (t === "response.function_call_arguments.delta") {
-              const index = Number(obj.output_index ?? 0);
-              const current = toolCallsByIndex.get(index) || { index, id: obj.call_id || `call_${index}`, name: obj.name || "", arguments: "" };
-              current.arguments += obj.delta || "";
-              toolCallsByIndex.set(index, current);
-            } else if (t === "response.function_call_arguments.done") {
-              const index = Number(obj.output_index ?? 0);
-              const current = toolCallsByIndex.get(index) || { index, id: obj.call_id || `call_${index}`, name: obj.name || "", arguments: "" };
-              current.arguments = obj.arguments || current.arguments;
-              toolCallsByIndex.set(index, current);
-            } else if (t === "response.completed") {
-              this.collectCompletedToolCalls(obj.response, toolCallsByIndex);
-              const usage = obj.response?.usage;
-              if (usage) {
-                inputTokens = Number(usage.input_tokens) || 0;
-                outputTokens = Number(usage.output_tokens) || 0;
-              }
-            }
-          } catch { /* skip malformed */ }
-        }
-      }
+      const ctx: CodexStreamContext = {
+        extractReasoningDelta,
+        textFromReasoningPart,
+        extractReasoningItemText,
+        collectCompletedToolCalls,
+        estimateTokens: (text) => this.estimateTokens(text),
+        estimateMessagesTokens: (messages) => this.estimateMessagesTokens(messages),
+        generateId: () => this.generateId(),
+      };
+      const { text, reasoningText, inputTokens, outputTokens, toolCallsByIndex } =
+        await parseCodexResponsesSSE(response.body, ctx);
 
       const promptTokens = inputTokens || this.estimateMessagesTokens(request.messages);
       const completionTokens = outputTokens || this.estimateTokens(text);
@@ -474,183 +360,13 @@ export class CodexProvider extends BaseProvider {
       }
 
       const id = this.generateId();
-      const model = request.model;
-      const encoder = new TextEncoder();
-      const upstream = response.body;
-      const provider = this;
-
-      const stream = new ReadableStream<Uint8Array>({
-        async start(controller) {
-          const reader = upstream.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          let started = false;
-          let accumulated = "";
-          let hasToolCalls = false;
-          const toolCallsByIndex = new Map<number, PendingToolCall>();
-          const emittedToolIndexes = new Set<number>();
-          const reasoningByOutput = new Map<number, string>();
-
-          const emit = (delta: any, finish_reason: string | null = null) => {
-            const chunk: any = {
-              id, object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000),
-              model,
-              choices: [{ index: 0, delta, finish_reason }],
-            };
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
-          };
-
-          const emitRole = () => {
-            if (started) return;
-            started = true;
-            emit({ role: "assistant" });
-          };
-
-          const emitToolStart = (call: PendingToolCall) => {
-            emitRole();
-            hasToolCalls = true;
-            emittedToolIndexes.add(call.index);
-            emit({
-              tool_calls: [{
-                index: call.index,
-                id: call.id,
-                type: "function",
-                function: { name: call.name, arguments: "" },
-              }],
-            });
-          };
-
-          const emitToolArguments = (index: number, delta: string) => {
-            if (!delta) return;
-            emitRole();
-            hasToolCalls = true;
-            emit({
-              tool_calls: [{
-                index,
-                function: { arguments: delta },
-              }],
-            });
-          };
-
-          const emitReasoning = (index: number, delta: string) => {
-            if (!delta) return;
-            emitRole();
-            reasoningByOutput.set(index, `${reasoningByOutput.get(index) || ""}${delta}`);
-            emit({ reasoning_content: delta });
-          };
-
-          const emitMissingCompletedToolCalls = () => {
-            for (const pending of [...toolCallsByIndex.values()].sort((a, b) => a.index - b.index)) {
-              if (!pending.name) continue;
-              if (!emittedToolIndexes.has(pending.index)) {
-                emitToolStart(pending);
-                emitToolArguments(pending.index, pending.arguments || "{}");
-              }
-            }
-          };
-
-          try {
-            while (true) {
-              const { value, done } = await reader.read();
-              if (done) break;
-              buffer += decoder.decode(value, { stream: true });
-
-              let idx;
-              while ((idx = buffer.indexOf("\n\n")) !== -1) {
-                const event = buffer.slice(0, idx);
-                buffer = buffer.slice(idx + 2);
-
-                let dataLine = "";
-                for (const line of event.split("\n")) {
-                  if (line.startsWith("data: ")) dataLine += line.slice(6);
-                  else if (line.startsWith("data:")) dataLine += line.slice(5);
-                }
-                if (!dataLine || dataLine === "[DONE]") continue;
-
-                try {
-                  const obj = JSON.parse(dataLine);
-                  const t = obj.type || "";
-                  const reasoningDelta = provider.extractReasoningDelta(obj);
-
-                  if (reasoningDelta) {
-                    emitReasoning(Number(obj.output_index ?? 0), reasoningDelta);
-                  } else if (t === "response.reasoning_summary_text.done" || t === "response.reasoning_summary_part.done") {
-                    const index = Number(obj.output_index ?? 0);
-                    const doneText = typeof obj.text === "string" ? obj.text : provider.textFromReasoningPart(obj.part);
-                    if (doneText && !reasoningByOutput.get(index)) emitReasoning(index, doneText);
-                  } else if (t === "response.output_text.delta") {
-                    const delta = obj.delta || "";
-                    if (!delta) continue;
-                    emitRole();
-                    accumulated += delta;
-                    emit({ content: delta });
-                  } else if (t === "response.output_item.added" || t === "response.output_item.done") {
-                    const item = obj.item || {};
-                    if (item.type === "reasoning") {
-                      const index = Number(obj.output_index ?? 0);
-                      const itemText = provider.extractReasoningItemText(item);
-                      if (itemText && !reasoningByOutput.get(index)) {
-                        emitReasoning(index, itemText);
-                      }
-                    } else if (item.type === "function_call") {
-                      const index = Number(obj.output_index ?? toolCallsByIndex.size);
-                      const current = toolCallsByIndex.get(index) || {
-                        index,
-                        id: item.call_id || item.id || `call_${index}`,
-                        name: item.name || "",
-                        arguments: "",
-                      };
-                      current.id = item.call_id || item.id || current.id;
-                      current.name = item.name || current.name;
-                      current.arguments = item.arguments || current.arguments;
-                      toolCallsByIndex.set(index, current);
-                      if (current.name && !emittedToolIndexes.has(index)) {
-                        emitToolStart(current);
-                        if (current.arguments) emitToolArguments(index, current.arguments);
-                      }
-                    }
-                  } else if (t === "response.function_call_arguments.delta") {
-                    const index = Number(obj.output_index ?? 0);
-                    const current = toolCallsByIndex.get(index) || { index, id: obj.call_id || `call_${index}`, name: obj.name || "", arguments: "" };
-                    current.arguments += obj.delta || "";
-                    toolCallsByIndex.set(index, current);
-                    emitToolArguments(index, obj.delta || "");
-                  } else if (t === "response.function_call_arguments.done") {
-                    const index = Number(obj.output_index ?? 0);
-                    const current = toolCallsByIndex.get(index) || { index, id: obj.call_id || `call_${index}`, name: obj.name || "", arguments: "" };
-                    const previousLength = current.arguments.length;
-                    current.arguments = obj.arguments || current.arguments;
-                    toolCallsByIndex.set(index, current);
-                    if (!emittedToolIndexes.has(index) && current.name) emitToolStart(current);
-                    if (current.arguments.length > previousLength && previousLength === 0) emitToolArguments(index, current.arguments);
-                  } else if (t === "response.completed" || t === "response.done") {
-                    provider.collectCompletedToolCalls(obj.response, toolCallsByIndex);
-                    emitMissingCompletedToolCalls();
-                    emit({}, hasToolCalls ? "tool_calls" : "stop");
-                    controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                    controller.close();
-                    return;
-                  } else if (t === "response.failed" || t === "error") {
-                    emit({}, "stop");
-                    controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                    controller.close();
-                    return;
-                  }
-                } catch { /* skip malformed */ }
-              }
-            }
-
-            if (!started) emit({ role: "assistant", content: accumulated });
-            emitMissingCompletedToolCalls();
-            emit({}, hasToolCalls ? "tool_calls" : "stop");
-            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-            controller.close();
-          } catch (err) {
-            try { controller.error(err); } catch { /* already errored */ }
-          }
-        },
-      });
+      const streamCtx = {
+        extractReasoningDelta,
+        textFromReasoningPart,
+        extractReasoningItemText,
+        collectCompletedToolCalls,
+      };
+      const stream = convertCodexResponsesToOpenAIStream(response.body, id, request.model, streamCtx);
 
       return { success: true, stream, promptTokens: 0, completionTokens: 0, tokensUsed: 0 };
     } catch (e) {

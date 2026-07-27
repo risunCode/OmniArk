@@ -1,0 +1,17 @@
+.git
+.github
+.kilo
+.kiro
+.multibrain
+.env
+.env.*
+!.env.example
+node_modules
+dashboard/node_modules
+dashboard/dist
+data
+coverage
+*.log
+*.md
+docker-compose*.yml
+NUL

@@ -1,7 +1,7 @@
 import type { BaseProvider, ModelInfo } from "./base";
-import { KiroProvider } from "./kiro";
-import { CodexProvider } from "./codex";
-import { QoderProvider } from "./qoder";
+import { KiroProvider } from "./kiro/index";
+import { CodexProvider } from "./codex/index";
+import { QoderProvider } from "./qoder/index";
 import { ByokProvider } from "./byok";
 
 /**

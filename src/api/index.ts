@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { accountsRouter } from "./accounts";
+import { accountsRouter } from "./accounts/index";
 import { proxySettingsRouter } from "./proxy-settings";
 import { statsRouter } from "./stats";
 import { keysRouter } from "./keys";
