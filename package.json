@@ -1,7 +1,7 @@
 {
   "name": "omniark",
   "version": "1.0.0",
-  "description": "AI Proxy Pool for Multiple Providers (Kiro, Codex, Qoder, BYOK) — PRIVATE",
+  "description": "AI Proxy Pool for Codex, Qoder, and BYOK — PRIVATE",
   "type": "module",
   "scripts": {
     "start": "bun scripts/production.ts",

@@ -233,12 +233,6 @@ export abstract class BaseProvider {
   }
 
   /**
-   * Catch-all provider used when no provider's ownsModel() matches. Exactly one
-   * provider sets this true (kiro). Others must leave it false.
-   */
-  isFallback = false;
-
-  /**
    * Wire format this provider speaks natively. The edge uses this to avoid
    * needless Anthropic↔OpenAI round-trips (see proxy/index.ts). "openai" is the
    * canonical internal shape; Anthropic-native providers set "anthropic".

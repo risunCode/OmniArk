@@ -3,8 +3,6 @@
  *
  * Detects installed AI coding clients, generates proxy configs for each,
  * and writes them to disk with backup support.
- *
- * Adapted from kiro-unified frontend/src/main/proxy/clients/.
  */
 import type {
   ClientTarget,

@@ -1,6 +1,6 @@
 # OmniArk
 
-**AI Proxy Pool for Multiple Providers** — Load balancing, credit tracking, and unified OpenAI-compatible routing for Kiro, Kiro Pro, Codex, Qoder, and BYOK accounts.
+**AI Proxy Pool for Multiple Providers** — Load balancing, credit tracking, and unified OpenAI-compatible routing for Codex, Qoder, and BYOK accounts.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Bun](https://img.shields.io/badge/Bun-1.x-000000?logo=bun)](https://bun.sh)
@@ -48,8 +48,7 @@ This fork focuses on keeping the proxy pool core lean:
 
 - **Removed**: Python dependencies, Playwright/Camoufox browser automation, the VCC generator, and the auth-bot orchestration.
 - **Removed providers**: Canva, YouMind, CodeBuddy, CodeBuddy China, GitLab Duo.
-- **Kept providers**: Kiro, Kiro Pro, Codex, Qoder, plus BYOK (bring-your-own-key).
-- **Image Studio**: kept but re-purposed to route through **Codex** image/video models instead of Canva.
+- **Kept providers**: Codex, Qoder, plus BYOK (bring-your-own-key).
 - **Rebrand**: all `etteum` / `Etteum` / `poolprox3` / `aiproxy` references moved to **OmniArk**.
 
 So if you’re looking for the original full-featured version with the auth bot and extra providers, head over to **[priyo000/etteum-pool](https://github.com/priyo000/etteum-pool)**. OmniArk is the trimmed-down, no-browser-fuss variant we run ourselves.
@@ -98,18 +97,11 @@ Optional log-body toggles:
 
 ## Supported providers
 
-- `kiro` / `kiro-pro`
 - `codex`
 - `qoder`
 - `byok` (bring your own OpenAI-compatible key)
 
 Add accounts through the dashboard at **http://localhost:1931**.
-
----
-
-## Image / video generation
-
-The Image Studio routes to Codex image/video models. Use model IDs prefixed with `codex-image-*` or `codex-video-*`.
 
 ---
 

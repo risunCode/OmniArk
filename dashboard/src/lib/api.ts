@@ -1,11 +1,6 @@
 function resolveApiBase(): string {
   if (import.meta.env.VITE_API_BASE) return import.meta.env.VITE_API_BASE;
-  const port = window.location.port;
-  if (!port || port === "443" || port === "80") {
-    return window.location.origin;
-  }
-  const backendPort = import.meta.env.VITE_BACKEND_PORT || (Number(port) - 1) || "1930";
-  return `http://${window.location.hostname}:${backendPort}`;
+  return window.location.origin;
 }
 
 export const API_BASE = resolveApiBase();
@@ -14,12 +9,7 @@ export function getWsBase(): string {
   const configured = import.meta.env.VITE_WS_BASE;
   if (configured) return configured;
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const port = window.location.port;
-  if (!port || port === "443" || port === "80") {
-    return `${protocol}://${window.location.hostname}`;
-  }
-  const backendPort = import.meta.env.VITE_BACKEND_PORT || (Number(port) - 1) || "1930";
-  return `${protocol}://${window.location.hostname}:${backendPort}`;
+  return `${protocol}://${window.location.host}`;
 }
 
 function getApiKey(): string {
@@ -129,6 +119,10 @@ export async function fetchProviders() {
   return fetchApi("/api/stats/providers");
 }
 
+export async function fetchAvailableProviders(): Promise<{ data: string[] }> {
+  return fetchApi("/api/providers");
+}
+
 export async function fetchUsage(hours: number | null = 24, range?: string) {
   const params = new URLSearchParams();
   if (hours !== null) params.set("hours", String(hours));
@@ -171,6 +165,18 @@ export async function fetchRequestDetail(id: number) {
 
 export async function fetchModels() {
   return fetchApi("/v1/models");
+}
+
+export async function testUpstreamModel(model: string): Promise<{
+  success: boolean;
+  model: string;
+  provider?: string;
+  account?: string;
+  latencyMs?: number;
+  response?: string;
+  error?: string;
+}> {
+  return fetchApi(`/api/models/${encodeURIComponent(model)}/test`, { method: "POST", timeoutMs: 90_000 });
 }
 
 export interface ModelMappingDTO {
@@ -445,139 +451,51 @@ export async function scrapeProxies(options: {
   });
 }
 
-// Image Studio
-export interface AssistModelInfo {
-  id: string;
-  provider: string;
-}
-
-export interface ChatMessage {
-  role: "user" | "assistant";
-  content: string;
-}
-
-export async function fetchAssistModels(): Promise<{ data: AssistModelInfo[] }> {
-  return fetchApi("/api/image-studio/assist-models");
-}
-
-export async function assistPrompt(payload: {
-  message: string;
-  history?: ChatMessage[];
-  model?: string;
-}): Promise<{ reply: string; options: string[]; finalPrompt: string | null }> {
-  return fetchApi("/api/image-studio/assist", {
-    method: "POST",
-    body: JSON.stringify(payload),
-    timeoutMs: 90_000,
-  });
-}
-
-export async function generateImage(payload: {
-  prompt: string;
-  type?: "image" | "video";
-  aspectRatio?: string;
-  n?: number;
-  chatId?: number | null;
-}): Promise<{
-  id?: number;
-  urls: string[];
-  prompt: string;
-  type: string;
-  aspectRatio: string;
-  n: number;
-  creditsUsed: number;
-  createdAt?: string;
-  account: { id: number; email: string };
-}> {
-  return fetchApi("/api/image-studio/generate", {
-    method: "POST",
-    body: JSON.stringify(payload),
-    timeoutMs: 420_000,
-  });
-}
-
-export interface StoredChat {
+export interface ManagedApiKey {
   id: number;
-  title: string | null;
-  messages: ChatMessage[];
-  finalPrompt: string | null;
-  options: string[];
-  assistModel: string | null;
+  name: string;
+  keyPrefix: string;
+  modelAllowlist: string[];
+  dailyTokenLimit: number | null;
+  monthlyTokenLimit: number | null;
+  totalHitLimit: number | null;
+  totalHits: number;
+  dailyTokens: number;
+  monthlyTokens: number;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
   createdAt: string;
-  updatedAt: string;
+  updatedAt: string | null;
 }
 
-export interface StoredResult {
-  id: number;
-  chatId: number | null;
-  prompt: string;
-  type: "image" | "video";
-  aspectRatio: string;
-  n: number;
-  urls: string[];
-  creditsUsed: number;
-  createdAt: string;
+export interface ApiKeyPolicyInput {
+  name: string;
+  key?: string;
+  modelAllowlist: string[];
+  dailyTokenLimit: number | null;
+  monthlyTokenLimit: number | null;
+  totalHitLimit: number | null;
+  expiresAt: string | null;
 }
 
-export async function fetchChats(): Promise<{ data: StoredChat[] }> {
-  return fetchApi("/api/image-studio/chats");
+export async function fetchCustomApiKeys(): Promise<{ data: ManagedApiKey[] }> {
+  return fetchApi("/api/keys/custom");
 }
 
-export async function fetchChat(id: number): Promise<StoredChat> {
-  return fetchApi(`/api/image-studio/chats/${id}`);
+export async function createCustomApiKey(data: ApiKeyPolicyInput): Promise<{ data: ManagedApiKey; key: string }> {
+  return fetchApi("/api/keys/custom", { method: "POST", body: JSON.stringify(data) });
 }
 
-export async function createChat(payload: {
-  title?: string | null;
-  messages?: ChatMessage[];
-  finalPrompt?: string | null;
-  options?: string[];
-  assistModel?: string | null;
-}): Promise<StoredChat> {
-  return fetchApi("/api/image-studio/chats", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+export async function updateCustomApiKey(id: number, data: ApiKeyPolicyInput): Promise<{ data: ManagedApiKey }> {
+  return fetchApi(`/api/keys/custom/${id}`, { method: "PATCH", body: JSON.stringify(data) });
 }
 
-export async function updateChat(
-  id: number,
-  payload: {
-    title?: string | null;
-    messages?: ChatMessage[];
-    finalPrompt?: string | null;
-    options?: string[];
-    assistModel?: string | null;
-  },
-): Promise<StoredChat> {
-  return fetchApi(`/api/image-studio/chats/${id}`, {
-    method: "PUT",
-    body: JSON.stringify(payload),
-  });
+export async function rotateCustomApiKey(id: number): Promise<{ data: ManagedApiKey; key: string }> {
+  return fetchApi(`/api/keys/custom/${id}/rotate`, { method: "POST" });
 }
 
-export async function deleteChat(id: number): Promise<{ ok: boolean }> {
-  return fetchApi(`/api/image-studio/chats/${id}`, { method: "DELETE" });
-}
-
-export async function fetchResults(params?: {
-  chatId?: number;
-  limit?: number;
-}): Promise<{ data: StoredResult[] }> {
-  const qs = new URLSearchParams();
-  if (params?.chatId !== undefined) qs.set("chatId", String(params.chatId));
-  if (params?.limit !== undefined) qs.set("limit", String(params.limit));
-  const suffix = qs.toString() ? `?${qs.toString()}` : "";
-  return fetchApi(`/api/image-studio/results${suffix}`);
-}
-
-export async function deleteResult(id: number): Promise<{ ok: boolean }> {
-  return fetchApi(`/api/image-studio/results/${id}`, { method: "DELETE" });
-}
-
-export async function clearResults(chatId?: number): Promise<{ ok: boolean }> {
-  const suffix = chatId !== undefined ? `?chatId=${chatId}` : "";
-  return fetchApi(`/api/image-studio/results${suffix}`, { method: "DELETE" });
+export async function deleteCustomApiKey(id: number): Promise<void> {
+  return fetchApi(`/api/keys/custom/${id}`, { method: "DELETE" });
 }
 
 export interface CodexAuthorizeResponse {

@@ -4,6 +4,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Search, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import UsageTopology from "@/components/dashboard/UsageTopology";
 import { fetchRequests, fetchRequestDetail } from "@/lib/api";
 import { formatDateTimeID } from "@/lib/utils";
 import { useWsEvent } from "@/hooks/useWebSocket";
@@ -70,6 +72,8 @@ export default function Requests() {
   const [selected, setSelected] = useState<RequestLog | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [page, setPage] = useState(1);
+  const [activeTab, setActiveTab] = useState("overview");
+  const [usagePeriod, setUsagePeriod] = useState("1d");
   const perPage = 25;
 
   /**
@@ -137,7 +141,7 @@ export default function Requests() {
         <div>
           <h1 className="text-2xl font-bold text-[var(--foreground)]">Requests</h1>
           <p className="text-sm text-[var(--muted-foreground)] mt-1">
-            Recent API request logs from PostgreSQL
+            Monitor usage analytics and inspect request details
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
@@ -145,6 +149,29 @@ export default function Requests() {
         </Button>
       </div>
 
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <TabsList>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="details">Details</TabsTrigger>
+          </TabsList>
+          {activeTab === "overview" && (
+            <Tabs value={usagePeriod} onValueChange={setUsagePeriod}>
+              <TabsList>
+                <TabsTrigger value="1d">Today</TabsTrigger>
+                <TabsTrigger value="7d">7D</TabsTrigger>
+                <TabsTrigger value="30d">30D</TabsTrigger>
+                <TabsTrigger value="all">All</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          )}
+        </div>
+
+        <TabsContent value="overview" className="mt-6">
+          <UsageTopology period={usagePeriod} />
+        </TabsContent>
+
+        <TabsContent value="details" className="mt-6 space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--muted-foreground)]" />
@@ -152,8 +179,6 @@ export default function Requests() {
         </div>
         <select value={provider} onChange={(e) => setProvider(e.target.value)} className="h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
           <option value="all">All Providers</option>
-          <option value="kiro">Kiro</option>
-          <option value="kiro-pro">Kiro Pro</option>
           <option value="codex">Codex</option>
           <option value="qoder">Qoder</option>
         </select>
@@ -208,6 +233,8 @@ export default function Requests() {
           )}
         </CardContent>
       </Card>
+        </TabsContent>
+      </Tabs>
 
       {selected && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/50" onClick={() => setSelected(null)}>

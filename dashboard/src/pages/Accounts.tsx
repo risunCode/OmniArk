@@ -11,7 +11,7 @@ import {
   DialogTitle as DTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Plus, RefreshCw, ChevronDown, Loader2, Key, Pencil, Trash2, Zap, Lock, Shield, Eye, EyeOff } from "lucide-react";
+import { Plus, RefreshCw, ChevronDown, Loader2, Key, Pencil, Trash2, Zap, Lock, Eye, EyeOff } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { useWsEvent } from "@/hooks/useWebSocket";
 import {
@@ -31,7 +31,7 @@ import {
   type ByokProvider,
 } from "@/lib/api";
 
-type Provider = "kiro" | "kiro-pro" | "codex" | "qoder";
+type Provider = "codex" | "qoder";
 
 type ByokFormKey = {
   id?: number;
@@ -51,10 +51,9 @@ interface Account {
   quotaRemaining?: number;
 }
 
-const providers: Provider[] = ["kiro", "kiro-pro", "codex", "qoder"];
+const providers: Provider[] = ["codex", "qoder"];
 
 function labelProvider(provider: string) {
-  if (provider === "kiro-pro") return "Kiro Pro";
   if (provider === "codex") return "Codex";
   if (provider === "qoder") return "Qoder";
   return provider.charAt(0).toUpperCase() + provider.slice(1);
@@ -358,9 +357,7 @@ export default function Accounts() {
 
   function handleOpenAddDialog(provider: Provider) {
     resetCodexOAuthFlow();
-    if (provider === "kiro-pro") {
-      setAddMode("instant");
-    } else if (provider === "codex" || provider === "qoder") {
+    if (provider === "codex" || provider === "qoder") {
       setAddMode("pat");
     }
     setAddDialogProvider(provider);
@@ -641,96 +638,20 @@ export default function Accounts() {
         </div>
       )}
 
-      {/* Provider cards */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {providerStats.map((stat) => (
-          <Card
-            key={stat.provider}
-            className="border-[var(--border)] cursor-pointer hover:border-[var(--primary)]/50 transition-colors"
-            onClick={() => navigate(`/accounts/${stat.provider}`)}
-          >
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base">{labelProvider(stat.provider)}</CardTitle>
-                <span className="text-xs text-[var(--muted-foreground)]">{stat.total} accounts</span>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {/* Status grid */}
-              <div className="grid grid-cols-4 gap-2 text-center">
-                <div className="rounded-md bg-[var(--secondary)] p-2">
-                  <p className="text-lg font-bold text-[var(--success)]">{stat.active}</p>
-                  <p className="text-[10px] text-[var(--muted-foreground)]">Active</p>
-                </div>
-                <div className="rounded-md bg-[var(--secondary)] p-2">
-                  <p className="text-lg font-bold text-[var(--warning)]">{stat.exhausted}</p>
-                  <p className="text-[10px] text-[var(--muted-foreground)]">Exhausted</p>
-                </div>
-                <div className="rounded-md bg-[var(--secondary)] p-2">
-                  <p className="text-lg font-bold text-[var(--warning)]">{stat.pending}</p>
-                  <p className="text-[10px] text-[var(--muted-foreground)]">Pending</p>
-                </div>
-                <div className="rounded-md bg-[var(--secondary)] p-2">
-                  <p className="text-lg font-bold text-[var(--error)]">{stat.error}</p>
-                  <p className="text-[10px] text-[var(--muted-foreground)]">Error</p>
-                </div>
-              </div>
-
-              {/* Credits remaining */}
-              <div className="space-y-1.5">
-                <div className="flex justify-between text-xs">
-                  <span className="text-[var(--muted-foreground)]">Credits</span>
-                  <span className="text-[var(--foreground)]">
-                    {stat.credits.remaining.toFixed(1)} / {stat.credits.total.toFixed(1)} remaining
-                  </span>
-                </div>
-                <Progress
-                  value={stat.credits.total > 0 ? Math.round((stat.credits.remaining / stat.credits.total) * 100) : 0}
-                  className="h-2"
-                />
-              </div>
-
-              {/* Buttons */}
-              <div onClick={(e) => e.stopPropagation()}>
-                <Button className="w-full" variant="default" size="sm" onClick={() => handleOpenAddDialog(stat.provider)}>
-                  <Plus className="mr-1 h-4 w-4" /> Add
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
       {/* BYOK Providers Section */}
-      <div className="space-y-4">
-        <div className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--card)] p-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--primary)]/10 text-[var(--primary)]">
-              <Key className="h-5 w-5" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-[var(--foreground)]">Custom Providers (BYOK)</h2>
-              <p className="text-sm text-[var(--muted-foreground)]">Bring Your Own Key — use your own API providers</p>
-            </div>
+      <section className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-[var(--foreground)]">Custom Providers</h2>
+            <p className="mt-1 text-sm text-[var(--muted-foreground)]">OpenAI or Anthropic-compatible endpoints</p>
           </div>
-          <Button onClick={() => setByokDialogOpen(true)} className="gap-2 shadow-sm">
+          <Button onClick={() => setByokDialogOpen(true)} className="w-full gap-2 sm:w-auto">
             <Plus className="h-4 w-4" /> Add Provider
           </Button>
         </div>
 
-        {byokProviders.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-[var(--primary)]/20 bg-[var(--primary)]/[0.02] p-10 text-center">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--primary)]/10">
-              <Shield className="h-7 w-7 text-[var(--primary)]" />
-            </div>
-            <p className="text-sm font-medium text-[var(--foreground)]">No custom providers configured yet</p>
-            <p className="text-xs text-[var(--muted-foreground)] mt-1.5 mb-4">Connect your own API provider to use custom models with your keys</p>
-            <Button size="sm" onClick={() => setByokDialogOpen(true)} className="gap-2">
-              <Plus className="h-4 w-4" /> Add Your First Provider
-            </Button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {byokProviders.length > 0 && (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
             {byokProviders.map((provider) => (
               <Card
                 key={provider.id}
@@ -830,7 +751,29 @@ export default function Accounts() {
             ))}
           </div>
         )}
-      </div>
+        {byokProviders.length === 0 && (
+          <div className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-[var(--border)] px-4 py-3 text-sm text-[var(--muted-foreground)]">
+            <Key className="h-4 w-4" /> No custom providers — use Add Provider to connect an OpenAI/Anthropic-compatible endpoint
+          </div>
+        )}
+      </section>
+
+      <section className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+          <h2 className="text-lg font-semibold text-[var(--foreground)]">API Key Providers</h2>
+          <p className="mt-1 text-sm text-[var(--muted-foreground)]">Codex and Qoder accounts managed by OmniArk</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
+          {providerStats.map((stat) => (
+            <Card key={stat.provider} className="cursor-pointer border-[var(--border)] transition-colors hover:border-[var(--primary)]/50 hover:bg-[var(--secondary)]/20" onClick={() => navigate(`/accounts/${stat.provider}`)}>
+              <CardHeader className="pb-3"><div className="flex items-center justify-between"><div className="flex items-center gap-3"><ProviderMark provider={stat.provider} /><div><CardTitle className="text-base">{labelProvider(stat.provider)}</CardTitle><p className="mt-0.5 text-xs text-[var(--muted-foreground)]">API key provider</p></div></div><span className="text-xs text-[var(--muted-foreground)]">{stat.total}</span></div></CardHeader>
+              <CardContent className="space-y-4"><div className="grid grid-cols-4 gap-2 text-center"><div className="rounded-md bg-[var(--secondary)] p-2"><p className="text-lg font-bold text-[var(--success)]">{stat.active}</p><p className="text-[10px] text-[var(--muted-foreground)]">Active</p></div><div className="rounded-md bg-[var(--secondary)] p-2"><p className="text-lg font-bold text-[var(--warning)]">{stat.exhausted}</p><p className="text-[10px] text-[var(--muted-foreground)]">Exhausted</p></div><div className="rounded-md bg-[var(--secondary)] p-2"><p className="text-lg font-bold text-[var(--warning)]">{stat.pending}</p><p className="text-[10px] text-[var(--muted-foreground)]">Pending</p></div><div className="rounded-md bg-[var(--secondary)] p-2"><p className="text-lg font-bold text-[var(--error)]">{stat.error}</p><p className="text-[10px] text-[var(--muted-foreground)]">Error</p></div></div><div className="space-y-1.5"><div className="flex justify-between text-xs"><span className="text-[var(--muted-foreground)]">Credits</span><span>{stat.credits.remaining.toFixed(1)} / {stat.credits.total.toFixed(1)} remaining</span></div><Progress value={stat.credits.total > 0 ? Math.round((stat.credits.remaining / stat.credits.total) * 100) : 0} className="h-2" /></div><div onClick={(event) => event.stopPropagation()}><Button className="w-full" size="sm" onClick={() => handleOpenAddDialog(stat.provider)}><Plus className="mr-1 h-4 w-4" /> Add</Button></div></CardContent>
+            </Card>
+          ))}
+        </div>
+      </section>
 
       {/* BYOK Add/Edit Dialog */}
       <Dialog open={byokDialogOpen} onOpenChange={(open) => !open && handleCloseByokDialog()}>
@@ -1028,7 +971,7 @@ export default function Accounts() {
           <DialogHeader>
             <DTitle>Add {addDialogProvider ? labelProvider(addDialogProvider) : ""} Account</DTitle>
             <DialogDescription>
-              {addDialogProvider === "kiro-pro" || addDialogProvider === "codex"
+              {addDialogProvider === "codex"
                 ? "Add via instant login with refresh token."
                 : addDialogProvider === "qoder"
                 ? "Add via Personal Access Token (PAT)."
@@ -1037,7 +980,7 @@ export default function Accounts() {
           </DialogHeader>
 
           {/* Mode tabs */}
-          {addDialogProvider === "kiro-pro" || addDialogProvider === "codex" ? (
+          {addDialogProvider === "codex" ? (
             <div className="flex gap-1 rounded-md bg-[var(--secondary)] p-1">
               <button onClick={() => setAddMode("instant")}
                 className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "instant" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
@@ -1137,8 +1080,7 @@ export default function Accounts() {
             </div>
           )}
 
-          {/* Instant Login mode (Kiro Pro / Codex) */}
-          {addMode === "instant" && (addDialogProvider === "kiro-pro" || addDialogProvider === "codex") && (
+          {addMode === "instant" && addDialogProvider === "codex" && (
             <div className="space-y-4">
               <div>
                 <label className="text-sm text-[var(--foreground)]">Refresh Tokens (satu per baris)</label>
@@ -1158,13 +1100,22 @@ export default function Accounts() {
           )}
 
           {/* No manual add flow exists for this provider */}
-          {addDialogProvider !== null && !["kiro-pro", "codex", "qoder"].includes(addDialogProvider) && (
+          {addDialogProvider !== null && !["codex", "qoder"].includes(addDialogProvider) && (
             <div className="rounded-md border border-[var(--border)] bg-[var(--secondary)]/40 p-4 text-sm text-[var(--muted-foreground)]">
-              {labelProvider(addDialogProvider)} accounts can't be added manually — use instant token login (kiro-pro/codex) or a PAT (qoder).
+              {labelProvider(addDialogProvider)} accounts can't be added manually — use a Codex token or OAuth login, or a Qoder PAT.
             </div>
           )}
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function ProviderMark({ provider }: { provider: string }) {
+  const isCodex = provider === "codex";
+  return (
+    <span className={`grid h-9 w-9 place-items-center rounded-lg font-mono text-xs font-bold ${isCodex ? "bg-[var(--chart-1)]/15 text-[var(--chart-1)]" : "bg-[var(--chart-4)]/15 text-[var(--chart-4)]"}`}>
+      {isCodex ? "C" : "Q"}
+    </span>
   );
 }

@@ -16,8 +16,8 @@ export const config = {
   accountCacheTtlMs: Number(process.env.OMNIARK_ACCOUNT_CACHE_TTL_MS) || 3000,
   providerRequestTimeoutMs: Number(process.env.OMNIARK_PROVIDER_REQUEST_TIMEOUT_MS) || 120_000,
   providerQuotaTimeoutMs: Number(process.env.OMNIARK_PROVIDER_QUOTA_TIMEOUT_MS) || 15_000,
-  // Providers: kiro, kiro-pro, codex, qoder
-  providers: ["kiro", "kiro-pro", "codex", "qoder"] as const,
+  // Providers: codex, qoder (BYOK is managed separately)
+  providers: ["codex", "qoder"] as const,
 } as const;
 
 export type Config = typeof config;

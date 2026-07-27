@@ -1,6 +1,5 @@
 /**
  * Shared utilities for client config generators.
- * Adapted from kiro-unified frontend/src/main/proxy/clients/utils.ts.
  */
 import { constants } from "node:fs";
 import { access, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -214,6 +213,6 @@ export function resolveDefaultModel(info: ProxyConnectionInfo): string {
     models.find((m) => m.id.toLowerCase().includes("sonnet-4"))?.id ||
     models.find((m) => m.id.toLowerCase().includes("sonnet"))?.id ||
     models[0]?.id ||
-    "kp-sonnet-4.6"
+    "codex-auto"
   );
 }

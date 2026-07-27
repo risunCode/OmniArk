@@ -38,9 +38,9 @@ export async function configureHermes(
     ].join(newline);
 
     let content = existing;
-    const kiroProviderRegex = /^\s*- name:\s*omniark\b[\s\S]*?(?=^\s*- name:|^[a-z]|$)/gm;
-    if (kiroProviderRegex.test(content)) {
-      content = content.replace(kiroProviderRegex, providerBlock + newline);
+    const omniarkProviderRegex = /^\s*- name:\s*omniark\b[\s\S]*?(?=^\s*- name:|^[a-z]|$)/gm;
+    if (omniarkProviderRegex.test(content)) {
+      content = content.replace(omniarkProviderRegex, providerBlock + newline);
     } else if (content.includes("custom_providers:")) {
       content = content.replace(
         /(custom_providers:\s*)/,

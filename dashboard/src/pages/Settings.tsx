@@ -12,8 +12,6 @@ import { useApi } from "@/hooks/useApi";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
 
 const PROVIDER_LABELS: Record<string, string> = {
-  kiro: "Kiro",
-  "kiro-pro": "Kiro Pro",
   codex: "Codex",
   qoder: "Qoder",
 };

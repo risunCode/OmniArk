@@ -7,10 +7,8 @@ import {
   Key,
   Settings as SettingsIcon,
   Activity,
-  BarChart3,
   Sliders,
   Globe,
-  Sparkles,
   Filter,
   Plug,
   LogOut,
@@ -37,9 +35,15 @@ interface NavSection {
 
 const navSections: NavSection[] = [
   {
-    title: "ACCOUNTS",
+    title: "OVERVIEW",
     items: [
       { label: "Dashboard", path: "/", icon: LayoutDashboard },
+      { label: "Requests", path: "/requests", icon: Activity },
+    ],
+  },
+  {
+    title: "ACCOUNTS",
+    items: [
       { label: "Accounts", path: "/accounts", icon: Users },
       { label: "Models", path: "/models", icon: Cpu },
     ],
@@ -47,7 +51,6 @@ const navSections: NavSection[] = [
   {
     title: "TOOLS",
     items: [
-      { label: "Image Studio", path: "/image-studio", icon: Sparkles },
       { label: "Integration", path: "/integration", icon: Plug },
     ],
   },
@@ -58,13 +61,6 @@ const navSections: NavSection[] = [
       { label: "Proxy Pool", path: "/proxy-pool", icon: Globe },
       { label: "Filter Rules", path: "/filter-rules", icon: Filter },
       { label: "Proxy Settings", path: "/settings", icon: Sliders },
-    ],
-  },
-  {
-    title: "LOGS & ANALYTICS",
-    items: [
-      { label: "Requests", path: "/requests", icon: Activity },
-      { label: "Usage", path: "/usage", icon: BarChart3 },
     ],
   },
 ];

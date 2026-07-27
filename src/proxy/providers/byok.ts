@@ -60,7 +60,6 @@ interface ByokSelectionOptions {
 export class ByokProvider extends BaseProvider {
   name = "byok";
   override supportedModels: ModelInfo[] = [];
-  override isFallback = false;
   override nativeFormat: "openai" | "anthropic" = "openai";
 
   // Synchronous prefix → accounts cache (required for ownsModel sync check).
@@ -105,7 +104,7 @@ export class ByokProvider extends BaseProvider {
       if (!account.enabled) continue;
       // Include error accounts so routing still claims their prefix.
       // The router will handle retries/failures; we must not let their
-      // models fall through to the fallback provider (Kiro).
+      // models fall through to another provider.
       if (account.status !== "active" && account.status !== "error") continue;
 
       const tokens = this.parseTokens(account.tokens);
@@ -233,7 +232,7 @@ export class ByokProvider extends BaseProvider {
    */
   override ownsModel(model: string): boolean {
     // If cache is stale, trigger a background refresh but still use last-known
-    // prefixes so requests don't fall through to the fallback provider (Kiro).
+    // prefixes so requests don't fall through to another provider.
     if (Date.now() >= this.cacheExpiry) {
       // Fire-and-forget: refresh in background, don't block routing
       this.refreshCache().catch(() => {/* swallow — next call will retry */});

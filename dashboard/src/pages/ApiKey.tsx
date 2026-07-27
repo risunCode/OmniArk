@@ -1,19 +1,95 @@
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Copy, Eye, EyeOff, RefreshCw, Check, Save, ShieldCheck } from "lucide-react";
-import { fetchApiKey, regenerateApiKey, setApiKey, testApiKey } from "@/lib/api";
+import { Select } from "@/components/ui/select";
+import { Copy, KeyRound, Pencil, Plus, RefreshCw, Save, ShieldCheck, Trash2, X } from "lucide-react";
+import {
+  createCustomApiKey,
+  deleteCustomApiKey,
+  fetchCustomApiKeys,
+  fetchModels,
+  fetchApiKey,
+  regenerateApiKey,
+  rotateCustomApiKey,
+  setApiKey,
+  testApiKey,
+  updateCustomApiKey,
+  type ApiKeyPolicyInput,
+  type ManagedApiKey,
+} from "@/lib/api";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
+
+interface FormState {
+  name: string;
+  key: string;
+  modelAllowlist: string[];
+  dailyTokenLimit: string;
+  monthlyTokenLimit: string;
+  totalHitLimit: string;
+  expiresAt: string;
+}
+
+const emptyForm = (): FormState => ({
+  name: "",
+  key: "",
+  modelAllowlist: [],
+  dailyTokenLimit: "",
+  monthlyTokenLimit: "",
+  totalHitLimit: "",
+  expiresAt: "",
+});
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat().format(value);
+}
+
+function formatDate(value: string | null) {
+  return value ? new Date(value).toLocaleString() : "Never";
+}
+
+function limitLabel(used: number, limit: number | null, unit: string) {
+  return limit ? `${formatNumber(used)} / ${formatNumber(limit)} ${unit}` : `Unlimited (${formatNumber(used)} ${unit})`;
+}
+
+function toForm(key: ManagedApiKey): FormState {
+  return {
+    name: key.name,
+    key: "",
+    modelAllowlist: key.modelAllowlist,
+    dailyTokenLimit: key.dailyTokenLimit?.toString() || "",
+    monthlyTokenLimit: key.monthlyTokenLimit?.toString() || "",
+    totalHitLimit: key.totalHitLimit?.toString() || "",
+    expiresAt: key.expiresAt ? new Date(key.expiresAt).toISOString().slice(0, 16) : "",
+  };
+}
+
+function policyInput(form: FormState): ApiKeyPolicyInput {
+  const parse = (value: string) => value ? Number(value) : null;
+  return {
+    name: form.name.trim(),
+    ...(form.key.trim() ? { key: form.key.trim() } : {}),
+    modelAllowlist: form.modelAllowlist,
+    dailyTokenLimit: parse(form.dailyTokenLimit),
+    monthlyTokenLimit: parse(form.monthlyTokenLimit),
+    totalHitLimit: parse(form.totalHitLimit),
+    expiresAt: form.expiresAt ? new Date(form.expiresAt).toISOString() : null,
+  };
+}
 
 export default function ApiKey() {
   const [apiKey, setApiKeyState] = useState(localStorage.getItem("api_key") || "pool-proxy-secret-key");
   const [source, setSource] = useState("browser");
   const [showKey, setShowKey] = useState(false);
-  const { message, setMessage: setTimedMessage, clearMessage } = useTimedMessage<string>(null, 3500);
-  const { message: copied, setMessage: setCopiedTimed } = useTimedMessage<boolean>(null, 2000);
-  const [error, setError] = useState<string | null>(null);
   const [valid, setValid] = useState<boolean | null>(null);
+  const [keys, setKeys] = useState<ManagedApiKey[]>([]);
+  const [models, setModels] = useState<string[]>([]);
+  const [form, setForm] = useState<FormState>(emptyForm);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const { message, setMessage: setTimedMessage, clearMessage } = useTimedMessage<string>(null, 3500);
+  const [error, setError] = useState<string | null>(null);
 
   function notify(text: string) {
     setTimedMessage(text);
@@ -31,46 +107,43 @@ export default function ApiKey() {
   }
 
   async function loadKey() {
-    try {
-      const res = await fetchApiKey() as { key: string; source: string };
-      setApiKeyState(res.key);
-      setSource(res.source);
-      saveToBrowser(res.key);
-      setValid(true);
-    } catch (err) {
-      fail(err);
-    }
+    const res = await fetchApiKey() as { key: string; source: string };
+    setApiKeyState(res.key);
+    setSource(res.source);
+    saveToBrowser(res.key);
+    setValid(true);
+  }
+
+  async function loadManagedKeys() {
+    const [keyData, modelData] = await Promise.all([fetchCustomApiKeys(), fetchModels()]);
+    setKeys(keyData.data);
+    setModels(modelData.data.map((model: { id: string }) => model.id));
   }
 
   useEffect(() => {
-    loadKey();
+    Promise.all([loadKey(), loadManagedKeys()]).catch(fail);
   }, []);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(apiKey);
-    setCopiedTimed(true);
-  };
-
-  async function handleSave() {
+  async function handleSavePrimary() {
     try {
       const res = await setApiKey(apiKey) as { key: string; source: string };
       saveToBrowser(res.key);
       setSource(res.source);
       setValid(true);
-      notify("API key saved to backend and browser. It can now be used for proxy requests.");
+      notify("Primary API key saved and activated.");
     } catch (err) {
       fail(err);
     }
   }
 
-  async function handleRegenerate() {
-    if (!confirm("Regenerate API key? Existing generated key will stop working.")) return;
+  async function handleRegeneratePrimary() {
+    if (!confirm("Regenerate the primary API key? The previous generated key will stop working.")) return;
     try {
       const res = await regenerateApiKey() as { key: string; source: string };
       saveToBrowser(res.key);
       setSource(res.source);
       setValid(true);
-      notify("New API key generated, saved, and activated.");
+      notify("New primary API key generated and activated.");
     } catch (err) {
       fail(err);
     }
@@ -80,7 +153,65 @@ export default function ApiKey() {
     try {
       const res = await testApiKey(apiKey) as { valid: boolean };
       setValid(res.valid);
-      notify(res.valid ? "API key is valid." : "API key is invalid.");
+      notify(res.valid ? "API key is valid." : "API key is invalid or blocked by policy.");
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  function toggleModel(model: string) {
+    setForm((current) => ({
+      ...current,
+      modelAllowlist: current.modelAllowlist.includes(model)
+        ? current.modelAllowlist.filter((item) => item !== model)
+        : [...current.modelAllowlist, model],
+    }));
+  }
+
+  function resetForm() {
+    setEditingId(null);
+    setForm(emptyForm());
+    setRevealedKey(null);
+  }
+
+  async function handleSaveManaged() {
+    try {
+      const data = policyInput(form);
+      if (!data.name) throw new Error("Name is required");
+      if (editingId === null) {
+        const result = await createCustomApiKey(data);
+        setRevealedKey(result.key);
+        notify("Custom API key created. Copy it now; it cannot be revealed again.");
+      } else {
+        await updateCustomApiKey(editingId, data);
+        notify("API key policy updated.");
+      }
+      await loadManagedKeys();
+      if (editingId !== null) resetForm();
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  async function handleRotate(key: ManagedApiKey) {
+    if (!confirm(`Rotate '${key.name}'? The existing value will stop working immediately.`)) return;
+    try {
+      const result = await rotateCustomApiKey(key.id);
+      setRevealedKey(result.key);
+      notify("API key rotated. Copy the new value now; it cannot be revealed again.");
+      await loadManagedKeys();
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  async function handleDelete(key: ManagedApiKey) {
+    if (!confirm(`Delete '${key.name}'? This cannot be undone.`)) return;
+    try {
+      await deleteCustomApiKey(key.id);
+      if (editingId === key.id) resetForm();
+      await loadManagedKeys();
+      notify("Custom API key deleted.");
     } catch (err) {
       fail(err);
     }
@@ -89,83 +220,53 @@ export default function ApiKey() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--foreground)]">API Key</h1>
-        <p className="text-sm text-[var(--muted-foreground)] mt-1">
-          Generate and activate proxy API keys
-        </p>
+        <h1 className="text-2xl font-bold text-[var(--foreground)]">API Keys</h1>
+        <p className="mt-1 text-sm text-[var(--muted-foreground)]">Create scoped keys with model ACLs, quotas, expiry, and hit limits.</p>
       </div>
 
-      {(message || error) && (
-        <div className={`rounded-md p-3 text-sm ${message ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--error)]/10 text-[var(--error)]"}`}>
-          {message || error}
-        </div>
+      {(message || error) && <div className={`rounded-md p-3 text-sm ${message ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--error)]/10 text-[var(--error)]"}`}>{message || error}</div>}
+
+      {revealedKey && (
+        <Card className="border-[var(--success)]/50">
+          <CardHeader><CardTitle className="text-base">Copy the new API key now</CardTitle><CardDescription>This full value is shown only once.</CardDescription></CardHeader>
+          <CardContent className="flex flex-col gap-2 sm:flex-row"><Input value={revealedKey} readOnly className="font-mono" /><Button variant="outline" onClick={() => navigator.clipboard.writeText(revealedKey).then(() => notify("API key copied."))}><Copy className="h-4 w-4" /> Copy</Button><Button variant="ghost" onClick={() => setRevealedKey(null)}><X className="h-4 w-4" /> Hide</Button></CardContent>
+        </Card>
       )}
 
-      <Card className="border-[var(--border)] max-w-3xl">
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4" /> Active API Key
-          </CardTitle>
-          <CardDescription>
-            Source: <span className="font-mono">{source}</span>. The env fallback key also remains accepted.
-          </CardDescription>
-        </CardHeader>
+      <Card className="border-[var(--border)]">
+        <CardHeader><CardTitle className="flex items-center gap-2 text-base"><ShieldCheck className="h-4 w-4" /> Primary API Key</CardTitle><CardDescription>Source: <span className="font-mono">{source}</span>. This unrestricted owner key remains available.</CardDescription></CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Input
-                type={showKey ? "text" : "password"}
-                value={apiKey}
-                onChange={(e) => {
-                  setApiKeyState(e.target.value);
-                  setValid(null);
-                }}
-                className="pr-10 font-mono text-sm"
-              />
-              <button
-                onClick={() => setShowKey(!showKey)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-              >
-                {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
-            </div>
-            <Button variant="outline" size="icon" onClick={handleCopy} title="Copy">
-              {copied ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Copy className="w-4 h-4" />}
-            </Button>
-          </div>
-
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-sm">
-              Status: {valid === true && <span className="text-[var(--success)]">valid</span>}
-              {valid === false && <span className="text-[var(--error)]">invalid</span>}
-              {valid === null && <span className="text-[var(--muted-foreground)]">not tested</span>}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" size="sm" onClick={loadKey}>Load Active</Button>
-              <Button variant="outline" size="sm" onClick={handleTest}>Test</Button>
-              <Button variant="outline" size="sm" onClick={handleRegenerate}>
-                <RefreshCw className="w-4 h-4 mr-2" /> Generate
-              </Button>
-              <Button size="sm" onClick={handleSave}>
-                <Save className="w-4 h-4 mr-2" /> Save & Activate
-              </Button>
-            </div>
-          </div>
-
-          <div className="rounded-lg bg-[var(--secondary)] p-4 mt-4">
-            <h4 className="text-sm font-medium text-[var(--foreground)] mb-2">Usage Example</h4>
-            <pre className="text-xs text-[var(--muted-foreground)] overflow-x-auto">
-{`curl http://localhost:1930/v1/chat/completions \\
-  -H "Authorization: Bearer ${showKey ? apiKey : "sk-pool-***"}" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "claude-sonnet-4",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'`}
-            </pre>
-          </div>
+          <div className="flex gap-2"><Input type={showKey ? "text" : "password"} value={apiKey} onChange={(event) => { setApiKeyState(event.target.value); setValid(null); }} className="font-mono" /><Button variant="outline" size="icon" onClick={() => setShowKey(!showKey)}>{showKey ? "Hide" : "Show"}</Button><Button variant="outline" size="icon" onClick={() => navigator.clipboard.writeText(apiKey).then(() => notify("API key copied."))}><Copy className="h-4 w-4" /></Button></div>
+          <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm">Status: <b>{valid === true ? "valid" : valid === false ? "invalid" : "not tested"}</b></span><div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={() => loadKey().catch(fail)}>Load</Button><Button variant="outline" size="sm" onClick={handleTest}>Test</Button><Button variant="outline" size="sm" onClick={handleRegeneratePrimary}><RefreshCw className="h-4 w-4" /> Generate</Button><Button size="sm" onClick={handleSavePrimary}><Save className="h-4 w-4" /> Save</Button></div></div>
         </CardContent>
       </Card>
+
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+        <Card className="border-[var(--border)]">
+          <CardHeader><CardTitle className="flex items-center gap-2 text-base"><KeyRound className="h-4 w-4" /> Custom API Keys</CardTitle><CardDescription>Usage counters include successful proxy requests only.</CardDescription></CardHeader>
+          <CardContent className="space-y-3">
+            {keys.length === 0 && <p className="text-sm text-[var(--muted-foreground)]">No custom API keys created.</p>}
+            {keys.map((key) => {
+              const expired = key.expiresAt !== null && new Date(key.expiresAt).getTime() <= Date.now();
+              return <div key={key.id} className="rounded-lg border border-[var(--border)] p-4"><div className="flex flex-col justify-between gap-3 sm:flex-row"><div className="space-y-2"><div className="flex flex-wrap items-center gap-2"><b>{key.name}</b><Badge variant={expired ? "error" : "success"}>{expired ? "Expired" : "Active"}</Badge><span className="font-mono text-xs text-[var(--muted-foreground)]">{key.keyPrefix}</span></div><div className="grid gap-x-5 gap-y-1 text-xs text-[var(--muted-foreground)] sm:grid-cols-2"><span>Daily: {limitLabel(key.dailyTokens, key.dailyTokenLimit, "tokens")}</span><span>Monthly: {limitLabel(key.monthlyTokens, key.monthlyTokenLimit, "tokens")}</span><span>Hits: {limitLabel(key.totalHits, key.totalHitLimit, "hits")}</span><span>Expires: {formatDate(key.expiresAt)}</span></div><div className="flex flex-wrap gap-1">{key.modelAllowlist.length === 0 ? <Badge variant="secondary">All models</Badge> : key.modelAllowlist.map((model) => <Badge key={model} variant="outline">{model}</Badge>)}</div></div><div className="flex gap-1"><Button variant="ghost" size="icon" title="Edit" onClick={() => { setEditingId(key.id); setForm(toForm(key)); setRevealedKey(null); }}><Pencil className="h-4 w-4" /></Button><Button variant="ghost" size="icon" title="Rotate" onClick={() => handleRotate(key)}><RefreshCw className="h-4 w-4" /></Button><Button variant="ghost" size="icon" title="Delete" onClick={() => handleDelete(key)}><Trash2 className="h-4 w-4" /></Button></div></div></div>;
+            })}
+          </CardContent>
+        </Card>
+
+        <Card className="border-[var(--border)]">
+          <CardHeader><CardTitle className="text-base">{editingId === null ? "Create custom key" : "Edit key policy"}</CardTitle><CardDescription>Blank limits and model list mean unlimited access.</CardDescription></CardHeader>
+          <CardContent className="space-y-4">
+            <label className="block space-y-1 text-sm"><span>Name</span><Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Production app" /></label>
+            {editingId === null && <label className="block space-y-1 text-sm"><span>Custom key value (optional)</span><Input value={form.key} onChange={(event) => setForm({ ...form, key: event.target.value })} placeholder="Auto-generate when blank" className="font-mono" /></label>}
+            <label className="block space-y-1 text-sm"><span>Daily token limit</span><Input type="number" min="1" value={form.dailyTokenLimit} onChange={(event) => setForm({ ...form, dailyTokenLimit: event.target.value })} placeholder="Unlimited" /></label>
+            <label className="block space-y-1 text-sm"><span>Monthly token limit</span><Input type="number" min="1" value={form.monthlyTokenLimit} onChange={(event) => setForm({ ...form, monthlyTokenLimit: event.target.value })} placeholder="Unlimited" /></label>
+            <label className="block space-y-1 text-sm"><span>Total hit limit</span><Input type="number" min="1" value={form.totalHitLimit} onChange={(event) => setForm({ ...form, totalHitLimit: event.target.value })} placeholder="Unlimited" /></label>
+            <label className="block space-y-1 text-sm"><span>Expires at</span><Input type="datetime-local" value={form.expiresAt} onChange={(event) => setForm({ ...form, expiresAt: event.target.value })} /></label>
+            <div className="space-y-2"><div className="flex items-center justify-between text-sm"><span>Model allowlist</span><Button variant="ghost" size="sm" onClick={() => setForm({ ...form, modelAllowlist: [] })}>Allow all</Button></div><Select value="" onChange={(event) => { if (event.target.value) toggleModel(event.target.value); }}><option value="">Add allowed model</option>{models.filter((model) => !form.modelAllowlist.includes(model)).map((model) => <option key={model} value={model}>{model}</option>)}</Select><div className="flex flex-wrap gap-1">{form.modelAllowlist.length === 0 ? <span className="text-xs text-[var(--muted-foreground)]">All available models are allowed.</span> : form.modelAllowlist.map((model) => <button key={model} onClick={() => toggleModel(model)} className="rounded-full border border-[var(--border)] px-2 py-1 text-xs hover:bg-[var(--secondary)]">{model} ×</button>)}</div></div>
+            <div className="flex gap-2"><Button onClick={handleSaveManaged}>{editingId === null ? <Plus className="h-4 w-4" /> : <Save className="h-4 w-4" />}{editingId === null ? "Create" : "Save policy"}</Button>{editingId !== null && <Button variant="outline" onClick={resetForm}>Cancel</Button>}</div>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }

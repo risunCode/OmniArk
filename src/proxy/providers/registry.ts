@@ -1,5 +1,4 @@
 import type { BaseProvider, ModelInfo } from "./base";
-import { KiroProvider } from "./kiro/index";
 import { CodexProvider } from "./codex/index";
 import { QoderProvider } from "./qoder/index";
 import { ByokProvider } from "./byok";
@@ -13,25 +12,17 @@ import { ByokProvider } from "./byok";
  *
  * Routing (getProviderForModel) and model listing (getAllModels) iterate this
  * list — there is no per-provider logic anywhere else. Order matters only for
- * disambiguating overlapping patterns: more specific providers come first, and
- * the single isFallback provider (kiro standard) is consulted last.
+ * disambiguating overlapping patterns: more specific providers come first.
  */
-// kiro and kiro-pro are two variants of the SAME provider class — same upstream
-// (AWS CodeWhisperer), different model catalog + account pool. They keep
-// distinct provider names so DB/dashboard treat them separately.
-const kiro = new KiroProvider({ variant: "standard" });
-const kiroPro = new KiroProvider({ variant: "pro" });
 const codex = new CodexProvider();
 const qoder = new QoderProvider();
 const byok = new ByokProvider();
 
-// Priority order. qoder/codex/kiro-pro have unique prefixes; byok checks dynamic
-// prefixes from DB accounts. kiro is the fallback.
-const PROVIDER_ORDER = [qoder, codex, kiroPro, byok, kiro] as const;
+// Priority order. qoder/codex have unique prefixes; byok checks dynamic prefixes
+// from DB accounts.
+const PROVIDER_ORDER = [qoder, codex, byok] as const;
 
 export const providers = {
-  kiro,
-  "kiro-pro": kiroPro,
   codex,
   qoder,
   byok,
@@ -44,8 +35,7 @@ export function getProviderForModel(model: string): ProviderName | null {
   for (const provider of PROVIDER_ORDER) {
     if (provider.ownsModel(model)) return provider.name as ProviderName;
   }
-  const fallback = PROVIDER_ORDER.find((p) => p.isFallback);
-  return (fallback?.name as ProviderName) ?? null;
+  return null;
 }
 
 /** All models across every registered provider. */

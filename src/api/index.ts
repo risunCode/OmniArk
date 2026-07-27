@@ -4,10 +4,10 @@ import { proxySettingsRouter } from "./proxy-settings";
 import { statsRouter } from "./stats";
 import { keysRouter } from "./keys";
 import { proxyPoolRouter } from "./proxy-pool";
-import { imageStudioRouter } from "./image-studio";
 import { filtersRouter } from "./filters";
 import { integrationRouter } from "./integration";
 import { oauthRouter } from "./oauth";
+import { modelsRouter } from "./models";
 
 export const apiRouter = new Hono();
 
@@ -16,13 +16,13 @@ apiRouter.route("/settings", proxySettingsRouter);
 apiRouter.route("/stats", statsRouter);
 apiRouter.route("/keys", keysRouter);
 apiRouter.route("/proxy-pool", proxyPoolRouter);
-apiRouter.route("/image-studio", imageStudioRouter);
 apiRouter.route("/filters", filtersRouter);
 apiRouter.route("/integration", integrationRouter);
 apiRouter.route("/oauth", oauthRouter);
+apiRouter.route("/models", modelsRouter);
 
 apiRouter.get("/providers", (c) => {
-  return c.json({ data: ["kiro", "kiro-pro", "codex", "qoder"] });
+  return c.json({ data: ["codex", "qoder"] });
 });
 
 // Health check

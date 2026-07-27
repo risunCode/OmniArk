@@ -64,7 +64,7 @@ accountsRouter.get("/:id", async (c) => {
  */
 accountsRouter.post("/", async (c) => {
   const body = await c.req.json<{
-    provider: "kiro" | "kiro-pro" | "codex" | "qoder";
+    provider: "codex" | "qoder";
     email?: string;
     password?: string;
     personalToken?: string;
@@ -164,106 +164,22 @@ accountsRouter.post("/", async (c) => {
 /**
  * POST /api/accounts/instant-login - Instant login via refresh token (bulk)
  * No browser needed — just exchange refresh token for access token
- * Body: { tokens: ["refreshToken1", ...], provider?: "kiro-pro" | "codex" }
+ * Body: { tokens: ["refreshToken1", ...], provider?: "codex" }
  *
- * - kiro-pro (default): tokens are Kiro AWS Identity refresh tokens
  * - codex: tokens are OpenAI OAuth refresh tokens (start with rt_*, ~200 chars)
  */
 accountsRouter.post("/instant-login", async (c) => {
-  const body = await c.req.json<{ tokens: string[]; provider?: "kiro-pro" | "codex" }>();
-  const provider = body.provider || "kiro-pro";
+  const body = await c.req.json<{ tokens: string[]; provider?: "codex" }>();
 
   if (!body.tokens || !Array.isArray(body.tokens) || body.tokens.length === 0) {
     return c.json({ error: "tokens array is required (array of refresh token strings)" }, 400);
   }
 
-  if (provider === "codex") {
-    return await handleCodexInstantLogin(c, body.tokens);
+  if (body.provider && body.provider !== "codex") {
+    return c.json({ error: "Unsupported provider" }, 400);
   }
 
-  const REFRESH_URL = "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken";
-  const KIRO_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK";
-  let success = 0;
-  let failed = 0;
-  const errors: string[] = [];
-
-  for (const refreshToken of body.tokens) {
-    const trimmed = refreshToken.trim();
-    if (!trimmed) { failed++; continue; }
-
-    try {
-      const response = await fetch(REFRESH_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refreshToken: trimmed }),
-      });
-
-      if (!response.ok) {
-        errors.push(`token ...${trimmed.slice(-8)}: refresh failed (${response.status})`);
-        failed++;
-        continue;
-      }
-
-      const data = await response.json() as {
-        accessToken?: string;
-        refreshToken?: string;
-        expiresAt?: string;
-      };
-
-      if (!data.accessToken) {
-        errors.push(`token ...${trimmed.slice(-8)}: no access token received`);
-        failed++;
-        continue;
-      }
-
-      // Generate email identifier from token (Kiro tokens are not JWT, can't extract email)
-      // Use a hash of the refresh token as unique identifier
-      const tokenHash = trimmed.slice(10, 18);
-      let email = `kiro-${tokenHash}@token.local`;
-
-      const tokens = {
-        access_token: data.accessToken,
-        refresh_token: data.refreshToken || trimmed,
-        expires_at: data.expiresAt || null,
-        profile_arn: KIRO_PROFILE_ARN,
-      };
-
-      // Create or update account as active with tokens
-      const existing = await db.select().from(accounts)
-        .where(eq(accounts.email, email))
-        .then((rows) => rows.find((r) => r.provider === "kiro-pro"));
-
-      if (existing) {
-        await db.update(accounts).set({
-          status: "active",
-          tokens: tokens as unknown,
-          errorMessage: null,
-          lastLoginAt: new Date(),
-          updatedAt: new Date(),
-        }).where(eq(accounts.id, existing.id));
-      } else {
-        await db.insert(accounts).values({
-          provider: "kiro-pro",
-          email,
-          password: encrypt("instant-login"),
-          status: "active",
-          tokens: tokens as unknown,
-          lastLoginAt: new Date(),
-        });
-      }
-      success++;
-    } catch (err) {
-      errors.push(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
-      failed++;
-    }
-  }
-
-  pool.invalidate("kiro-pro" as ProviderName);
-  if (success > 0) {
-    broadcast({ type: "accounts_updated", data: { provider: "kiro-pro", count: success } });
-  }
-
-  return c.json({ success, failed, errors: errors.length > 0 ? errors : undefined });
+  return await handleCodexInstantLogin(c, body.tokens);
 });
 
 /**
@@ -272,7 +188,7 @@ accountsRouter.post("/instant-login", async (c) => {
 accountsRouter.post("/bulk", async (c) => {
   const body = await c.req.json<{
     accounts: Array<{
-      provider: "kiro" | "kiro-pro" | "codex";
+      provider: "codex" | "qoder";
       email: string;
       password: string;
     }>;

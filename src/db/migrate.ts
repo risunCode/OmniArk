@@ -30,11 +30,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS accounts_provider_email_idx ON accounts (provi
 CREATE TABLE IF NOT EXISTS request_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id INTEGER REFERENCES accounts(id),
+  api_key_id INTEGER REFERENCES api_keys(id),
   provider TEXT NOT NULL,
   model TEXT,
   prompt_tokens INTEGER DEFAULT 0,
   completion_tokens INTEGER DEFAULT 0,
   total_tokens INTEGER DEFAULT 0,
+  cached_tokens INTEGER DEFAULT 0,
+  estimated_cost REAL DEFAULT 0,
   credits_used REAL DEFAULT 0,
   status TEXT NOT NULL,
   duration_ms INTEGER,
@@ -59,6 +62,31 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  key_hash TEXT NOT NULL UNIQUE,
+  key_prefix TEXT NOT NULL,
+  model_allowlist TEXT NOT NULL DEFAULT '[]',
+  daily_token_limit INTEGER,
+  monthly_token_limit INTEGER,
+  total_hit_limit INTEGER,
+  total_hits INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER,
+  last_used_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS api_keys_expires_at_idx ON api_keys (expires_at);
+
+CREATE TABLE IF NOT EXISTS api_key_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  api_key_id INTEGER NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  period TEXT NOT NULL,
+  tokens INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS api_key_usage_key_period_idx ON api_key_usage (api_key_id, period);
+
 CREATE TABLE IF NOT EXISTS usage_summary (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   bucket TEXT NOT NULL,
@@ -70,38 +98,14 @@ CREATE TABLE IF NOT EXISTS usage_summary (
   prompt_tokens INTEGER DEFAULT 0,
   completion_tokens INTEGER DEFAULT 0,
   total_tokens INTEGER DEFAULT 0,
+  cached_tokens INTEGER DEFAULT 0,
+  estimated_cost REAL DEFAULT 0,
   credits_used REAL DEFAULT 0,
   total_duration_ms INTEGER DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS usage_summary_bucket_provider_model_idx ON usage_summary (bucket, provider, model);
 CREATE INDEX IF NOT EXISTS usage_summary_bucket_idx ON usage_summary (bucket);
 CREATE INDEX IF NOT EXISTS usage_summary_provider_idx ON usage_summary (provider, bucket);
-
-CREATE TABLE IF NOT EXISTS image_studio_chats (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  title TEXT,
-  messages TEXT NOT NULL,
-  final_prompt TEXT,
-  options TEXT,
-  assist_model TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS image_studio_chats_updated_at_idx ON image_studio_chats (updated_at);
-
-CREATE TABLE IF NOT EXISTS image_studio_results (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  chat_id INTEGER REFERENCES image_studio_chats(id) ON DELETE SET NULL,
-  prompt TEXT NOT NULL,
-  type TEXT NOT NULL DEFAULT 'image',
-  aspect_ratio TEXT NOT NULL DEFAULT '1:1',
-  n INTEGER NOT NULL DEFAULT 1,
-  urls TEXT NOT NULL,
-  credits_used REAL DEFAULT 0,
-  created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS image_studio_results_created_at_idx ON image_studio_results (created_at);
-CREATE INDEX IF NOT EXISTS image_studio_results_chat_idx ON image_studio_results (chat_id);
 
 CREATE TABLE IF NOT EXISTS filter_rules (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,6 +169,15 @@ const IDEMPOTENT_COLUMNS: Array<{ table: string; column: string; ddl: string }> 
   { table: "accounts", column: "free_limit",     ddl: "ALTER TABLE accounts ADD COLUMN free_limit REAL DEFAULT 0" },
   { table: "accounts", column: "free_remaining", ddl: "ALTER TABLE accounts ADD COLUMN free_remaining REAL DEFAULT 0" },
   { table: "accounts", column: "free_reset_at",  ddl: "ALTER TABLE accounts ADD COLUMN free_reset_at INTEGER" },
+  { table: "request_logs", column: "api_key_id", ddl: "ALTER TABLE request_logs ADD COLUMN api_key_id INTEGER REFERENCES api_keys(id)" },
+  { table: "request_logs", column: "cached_tokens", ddl: "ALTER TABLE request_logs ADD COLUMN cached_tokens INTEGER DEFAULT 0" },
+  { table: "request_logs", column: "estimated_cost", ddl: "ALTER TABLE request_logs ADD COLUMN estimated_cost REAL DEFAULT 0" },
+  { table: "usage_summary", column: "cached_tokens", ddl: "ALTER TABLE usage_summary ADD COLUMN cached_tokens INTEGER DEFAULT 0" },
+  { table: "usage_summary", column: "estimated_cost", ddl: "ALTER TABLE usage_summary ADD COLUMN estimated_cost REAL DEFAULT 0" },
+];
+
+const IDEMPOTENT_INDEXES = [
+  "CREATE INDEX IF NOT EXISTS request_logs_api_key_created_at_idx ON request_logs (api_key_id, created_at)",
 ];
 
 function tableHasColumn(table: string, column: string): boolean {
@@ -191,6 +204,12 @@ async function runIdempotentColumns() {
   }
 }
 
+async function runIdempotentIndexes() {
+  for (const ddl of IDEMPOTENT_INDEXES) {
+    await db.run(sql.raw(ddl));
+  }
+}
+
 function initializeBaseSchema() {
   client.exec(BASE_SCHEMA);
 }
@@ -211,6 +230,7 @@ export async function runMigrations() {
 
   // Always run idempotent column-add migrations (works on fresh deploys without drizzle/).
   await runIdempotentColumns();
+  await runIdempotentIndexes();
 }
 
 // Run if called directly

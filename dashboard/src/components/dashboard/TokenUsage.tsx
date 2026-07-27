@@ -28,6 +28,9 @@ interface ModelUsage {
 interface TokenUsageProps {
   stats?: TokenStats;
   modelUsage?: ModelUsage[];
+  period?: string;
+  onPeriodChange?: (period: string) => void;
+  hidePeriodSelector?: boolean;
 }
 
 const defaultStats: TokenStats = {
@@ -255,12 +258,16 @@ function processUsageData(rows: UsageRow[], period: string) {
 export default function TokenUsage({
   stats: externalStats = defaultStats,
   modelUsage: externalModelUsage = defaultModelUsage,
+  period: controlledPeriod,
+  onPeriodChange,
+  hidePeriodSelector = false,
 }: TokenUsageProps) {
-  const [period, setPeriod] = useState("1d");
+  const [localPeriod, setLocalPeriod] = useState("1d");
   const [chartData, setChartData] = useState<any[]>([]);
   const [filteredStats, setFilteredStats] = useState<TokenStats>(defaultStats);
   const [filteredModelUsage, setFilteredModelUsage] = useState<ModelUsage[]>([]);
 
+  const period = controlledPeriod || localPeriod;
   const stats = filteredStats;
   const modelUsage = filteredModelUsage;
 
@@ -270,6 +277,11 @@ export default function TokenUsage({
   );
 
   const reloadRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function setPeriod(periodValue: string) {
+    if (controlledPeriod === undefined) setLocalPeriod(periodValue);
+    onPeriodChange?.(periodValue);
+  }
 
   async function loadData() {
     const hours = getChartHours(period);
@@ -300,47 +312,43 @@ export default function TokenUsage({
   useWsEvent(["request_log", "request_error"], scheduleReload);
 
   return (
-    <Card className="border-[var(--border)]">
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-lg">Token Usage</CardTitle>
+    <div className="space-y-4">
+      {!hidePeriodSelector && (
+        <div className="flex justify-end">
           <Tabs value={period} onValueChange={setPeriod}>
             <TabsList>
-              <TabsTrigger value="1d">1d</TabsTrigger>
-              <TabsTrigger value="7d">7d</TabsTrigger>
-              <TabsTrigger value="30d">30d</TabsTrigger>
+              <TabsTrigger value="1d">Today</TabsTrigger>
+              <TabsTrigger value="7d">7D</TabsTrigger>
+              <TabsTrigger value="30d">30D</TabsTrigger>
               <TabsTrigger value="all">All</TabsTrigger>
             </TabsList>
           </Tabs>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-6">
-        {/* Summary cards */}
-        <div className="grid grid-cols-3 gap-4">
-          <div className="rounded-lg bg-[var(--secondary)] p-4">
-            <p className="text-xs text-[var(--muted-foreground)] uppercase tracking-wide">Total</p>
-            <p className="text-xl font-bold mt-1">{formatNumber(stats.total)}</p>
-          </div>
-          <div className="rounded-lg bg-[var(--secondary)] p-4">
-            <p className="text-xs text-[var(--muted-foreground)] uppercase tracking-wide">Prompt</p>
-            <p className="text-xl font-bold mt-1">{formatNumber(stats.prompt)}</p>
-          </div>
-          <div className="rounded-lg bg-[var(--secondary)] p-4">
-            <p className="text-xs text-[var(--muted-foreground)] uppercase tracking-wide">Completion</p>
-            <p className="text-xl font-bold mt-1">{formatNumber(stats.completion)}</p>
-          </div>
-        </div>
+      )}
 
-        {/* Chart */}
-        <div>
-          <h4 className="text-sm font-medium text-[var(--muted-foreground)] mb-4">Token Usage Over Time</h4>
-          <UsageChart data={chartData} period={period} colorsByModel={colorsByModel} />
-        </div>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Metric label="Total tokens" value={stats.total} />
+        <Metric label="Prompt tokens" value={stats.prompt} />
+        <Metric label="Completion tokens" value={stats.completion} />
+        <Metric label="Credits used" value={stats.credits || 0} />
+      </div>
 
-        {/* By Model */}
-        <div>
-          <h4 className="text-sm font-medium text-[var(--muted-foreground)] mb-4">By Model</h4>
-          <div className="space-y-3">
+      <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(300px,1fr)]">
+        <Card className="border-[var(--border)]">
+          <CardHeader>
+            <CardTitle className="text-base">Usage over time</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <UsageChart data={chartData} period={period} colorsByModel={colorsByModel} />
+          </CardContent>
+        </Card>
+
+        <Card className="border-[var(--border)]">
+          <CardHeader>
+            <CardTitle className="text-base">Usage by model</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
             {modelUsage.map((model) => (
               <div key={`${model.provider || "unknown"}/${model.model}`} className="space-y-1">
                 <div className="flex items-center justify-between gap-3 text-sm">
@@ -366,8 +374,20 @@ export default function TokenUsage({
             {modelUsage.length === 0 && (
               <p className="text-sm text-[var(--muted-foreground)]">No model usage yet</p>
             )}
-          </div>
-        </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: number }) {
+  return (
+    <Card className="border-[var(--border)]">
+      <CardContent className="p-4">
+        <p className="text-xs uppercase tracking-wide text-[var(--muted-foreground)]">{label}</p>
+        <p className="mt-1 text-xl font-bold text-[var(--foreground)]">{formatNumber(value)}</p>
       </CardContent>
     </Card>
   );

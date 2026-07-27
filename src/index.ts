@@ -6,7 +6,7 @@ import { runMigrations } from "./db/migrate";
 import { apiRouter } from "./api/index";
 import { proxyRouter } from "./proxy/index";
 import { websocketHandler, getClientCount } from "./ws/index";
-import { isValidApiKey } from "./api/keys";
+import { authenticateApiKey, type ApiKeyPrincipal } from "./api/keys";
 import { db } from "./db/index";
 import { filterRules } from "./db/schema";
 import { sql } from "drizzle-orm";
@@ -59,7 +59,7 @@ try {
 }
 
 // Create Hono app
-const app = new Hono();
+const app = new Hono<{ Variables: { apiKeyPrincipal: ApiKeyPrincipal } }>();
 
 // Middleware
 app.use("*", cors());
@@ -78,13 +78,15 @@ app.use("/v1/*", async (c, next) => {
     );
   }
 
-  if (!(await isValidApiKey(token))) {
+  const principal = await authenticateApiKey(token);
+  if (!principal) {
     return c.json(
       { error: { message: "Invalid API key", type: "auth_error" } },
       401
     );
   }
 
+  c.set("apiKeyPrincipal", principal);
   await next();
 });
 
@@ -100,7 +102,8 @@ app.use("/api/*", async (c, next) => {
   const apiKeyQuery = c.req.query("api_key");
   const token = authHeader?.replace("Bearer ", "") || apiKeyQuery;
 
-  if (!token || !(await isValidApiKey(token))) {
+  const principal = token ? await authenticateApiKey(token) : null;
+  if (!principal || principal.managed) {
     return c.json(
       { error: { message: "Unauthorized", type: "auth_error" } },
       401

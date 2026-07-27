@@ -1,6 +1,5 @@
 /**
  * Shared types for the client config generation library.
- * Adapted from kiro-unified's client integration system.
  */
 
 export type ClientTarget =

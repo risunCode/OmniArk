@@ -16,7 +16,7 @@ import {
   toggleAllAccounts,
 } from "@/lib/api";
 
-type Provider = "kiro" | "kiro-pro" | "codex" | "qoder";
+type Provider = "codex" | "qoder";
 type Status = "active" | "exhausted" | "error" | "pending" | "disabled";
 
 interface CodexQuotaWindow {

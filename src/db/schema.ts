@@ -2,7 +2,7 @@ import { sqliteTable, text, real, integer, uniqueIndex, index } from "drizzle-or
 
 export const accounts = sqliteTable("accounts", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  provider: text("provider").notNull(), // kiro | kiro-pro | codex | qoder
+  provider: text("provider").notNull(), // codex | qoder | byok
   email: text("email").notNull(),
   password: text("password").notNull(), // encrypted
   status: text("status").notNull().default("pending"), // active | exhausted | error | pending
@@ -31,11 +31,14 @@ export const accounts = sqliteTable("accounts", {
 export const requestLogs = sqliteTable("request_logs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").references(() => accounts.id),
+  apiKeyId: integer("api_key_id").references(() => apiKeys.id),
   provider: text("provider").notNull(),
   model: text("model"),
   promptTokens: integer("prompt_tokens").default(0),
   completionTokens: integer("completion_tokens").default(0),
   totalTokens: integer("total_tokens").default(0),
+  cachedTokens: integer("cached_tokens").default(0),
+  estimatedCost: real("estimated_cost").default(0),
   creditsUsed: real("credits_used").default(0),
   status: text("status").notNull(), // success | error
   durationMs: integer("duration_ms"),
@@ -54,6 +57,7 @@ export const requestLogs = sqliteTable("request_logs", {
   index("request_logs_provider_created_at_idx").on(table.provider, table.createdAt),
   index("request_logs_provider_model_status_idx").on(table.provider, table.model, table.status),
   index("request_logs_account_idx").on(table.accountId),
+  index("request_logs_api_key_created_at_idx").on(table.apiKeyId, table.createdAt),
 ]);
 
 export const settings = sqliteTable("settings", {
@@ -61,6 +65,33 @@ export const settings = sqliteTable("settings", {
   value: text("value"),
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
+
+export const apiKeys = sqliteTable("api_keys", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  keyHash: text("key_hash").notNull().unique(),
+  keyPrefix: text("key_prefix").notNull(),
+  modelAllowlist: text("model_allowlist", { mode: "json" }).notNull().$defaultFn(() => []),
+  dailyTokenLimit: integer("daily_token_limit"),
+  monthlyTokenLimit: integer("monthly_token_limit"),
+  totalHitLimit: integer("total_hit_limit"),
+  totalHits: integer("total_hits").notNull().default(0),
+  expiresAt: integer("expires_at", { mode: "timestamp" }),
+  lastUsedAt: integer("last_used_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+}, (table) => [
+  index("api_keys_expires_at_idx").on(table.expiresAt),
+]);
+
+export const apiKeyUsage = sqliteTable("api_key_usage", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  apiKeyId: integer("api_key_id").notNull().references(() => apiKeys.id, { onDelete: "cascade" }),
+  period: text("period").notNull(),
+  tokens: integer("tokens").notNull().default(0),
+}, (table) => [
+  uniqueIndex("api_key_usage_key_period_idx").on(table.apiKeyId, table.period),
+]);
 
 export const usageSummary = sqliteTable("usage_summary", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -76,40 +107,14 @@ export const usageSummary = sqliteTable("usage_summary", {
   promptTokens: integer("prompt_tokens", { mode: "number" }).default(0),
   completionTokens: integer("completion_tokens", { mode: "number" }).default(0),
   totalTokens: integer("total_tokens", { mode: "number" }).default(0),
+  cachedTokens: integer("cached_tokens", { mode: "number" }).default(0),
+  estimatedCost: real("estimated_cost").default(0),
   creditsUsed: real("credits_used").default(0),
   totalDurationMs: integer("total_duration_ms", { mode: "number" }).default(0),
 }, (table) => [
   uniqueIndex("usage_summary_bucket_provider_model_idx").on(table.bucket, table.provider, table.model),
   index("usage_summary_bucket_idx").on(table.bucket),
   index("usage_summary_provider_idx").on(table.provider, table.bucket),
-]);
-
-export const imageStudioChats = sqliteTable("image_studio_chats", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  title: text("title"),
-  messages: text("messages", { mode: "json" }).notNull().$defaultFn(() => []),
-  finalPrompt: text("final_prompt"),
-  options: text("options", { mode: "json" }).$defaultFn(() => []),
-  assistModel: text("assist_model"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
-}, (table) => [
-  index("image_studio_chats_updated_at_idx").on(table.updatedAt),
-]);
-
-export const imageStudioResults = sqliteTable("image_studio_results", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  chatId: integer("chat_id").references(() => imageStudioChats.id, { onDelete: "set null" }),
-  prompt: text("prompt").notNull(),
-  type: text("type").notNull().default("image"),
-  aspectRatio: text("aspect_ratio").notNull().default("1:1"),
-  n: integer("n").notNull().default(1),
-  urls: text("urls", { mode: "json" }).notNull().$defaultFn(() => []),
-  creditsUsed: real("credits_used").default(0),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-}, (table) => [
-  index("image_studio_results_created_at_idx").on(table.createdAt),
-  index("image_studio_results_chat_idx").on(table.chatId),
 ]);
 
 export const filterRules = sqliteTable("filter_rules", {
@@ -166,15 +171,14 @@ export type Account = typeof accounts.$inferSelect;
 export type NewAccount = typeof accounts.$inferInsert;
 export type RequestLog = typeof requestLogs.$inferSelect;
 export type NewRequestLog = typeof requestLogs.$inferInsert;
+export type ApiKey = typeof apiKeys.$inferSelect;
+export type NewApiKey = typeof apiKeys.$inferInsert;
+export type ApiKeyUsage = typeof apiKeyUsage.$inferSelect;
 export type Setting = typeof settings.$inferSelect;
 export type UsageSummary = typeof usageSummary.$inferSelect;
 export type NewUsageSummary = typeof usageSummary.$inferInsert;
 export type ProxyPoolEntry = typeof proxyPool.$inferSelect;
 export type NewProxyPoolEntry = typeof proxyPool.$inferInsert;
-export type ImageStudioChat = typeof imageStudioChats.$inferSelect;
-export type NewImageStudioChat = typeof imageStudioChats.$inferInsert;
-export type ImageStudioResult = typeof imageStudioResults.$inferSelect;
-export type NewImageStudioResult = typeof imageStudioResults.$inferInsert;
 export type FilterRule = typeof filterRules.$inferSelect;
 export type NewFilterRule = typeof filterRules.$inferInsert;
 export type ModelMapping = typeof modelMappings.$inferSelect;

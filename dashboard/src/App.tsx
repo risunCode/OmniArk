@@ -11,10 +11,8 @@ const ByokAccountList = lazy(() => import("./pages/ByokAccountList"));
 const Models = lazy(() => import("./pages/Models"));
 const ApiKey = lazy(() => import("./pages/ApiKey"));
 const Requests = lazy(() => import("./pages/Requests"));
-const Usage = lazy(() => import("./pages/Usage"));
 const Settings = lazy(() => import("./pages/Settings"));
 const ProxyPool = lazy(() => import("./pages/ProxyPool"));
-const ImageStudio = lazy(() => import("./pages/ImageStudio"));
 const FilterRules = lazy(() => import("./pages/FilterRules"));
 const Integration = lazy(() => import("./pages/Integration"));
 const CodexOAuthCallback = lazy(() => import("./pages/CodexOAuthCallback"));
@@ -72,12 +70,10 @@ export default function App() {
           <Route path="/models" element={<Models />} />
           <Route path="/api-key" element={<ApiKey />} />
           <Route path="/requests" element={<Requests />} />
-          <Route path="/usage" element={<Usage />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/proxy-pool" element={<ProxyPool />} />
           <Route path="/filter-rules" element={<FilterRules />} />
           <Route path="/integration" element={<Integration />} />
-          <Route path="/image-studio" element={<ImageStudio />} />
           <Route path="/oauth/codex/callback" element={<CodexOAuthCallback />} />
         </Route>
       </Routes>

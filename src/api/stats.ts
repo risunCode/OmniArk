@@ -68,6 +68,8 @@ statsRouter.get("/", async (c) => {
         totalTokens: sql<number>`COALESCE(SUM(total_tokens), 0)`,
         promptTokens: sql<number>`COALESCE(SUM(prompt_tokens), 0)`,
         completionTokens: sql<number>`COALESCE(SUM(completion_tokens), 0)`,
+        cachedTokens: sql<number>`COALESCE(SUM(cached_tokens), 0)`,
+        estimatedCost: sql<number>`COALESCE(SUM(estimated_cost), 0)`,
         credits: sql<number>`COALESCE(SUM(credits_used), 0)`,
         avgDuration: sql<number>`CASE WHEN SUM(success_requests) > 0 THEN CAST(SUM(total_duration_ms) AS REAL) / SUM(success_requests) ELSE 0 END`,
       })
@@ -88,6 +90,8 @@ statsRouter.get("/", async (c) => {
       total: stats?.totalTokens || 0,
       prompt: stats?.promptTokens || 0,
       completion: stats?.completionTokens || 0,
+      cached: stats?.cachedTokens || 0,
+      estimatedCost: stats?.estimatedCost || 0,
       credits: stats?.credits || 0,
     },
     performance: {
@@ -119,6 +123,8 @@ statsRouter.get("/requests", async (c) => {
     promptTokens: requestLogs.promptTokens,
     completionTokens: requestLogs.completionTokens,
     totalTokens: requestLogs.totalTokens,
+    cachedTokens: requestLogs.cachedTokens,
+    estimatedCost: requestLogs.estimatedCost,
     creditsUsed: requestLogs.creditsUsed,
     status: requestLogs.status,
     durationMs: requestLogs.durationMs,
@@ -184,6 +190,8 @@ statsRouter.get("/usage", async (c) => {
       tokens: sql<number>`SUM(total_tokens)`,
       promptTokens: sql<number>`SUM(prompt_tokens)`,
       completionTokens: sql<number>`SUM(completion_tokens)`,
+      cachedTokens: sql<number>`SUM(cached_tokens)`,
+      estimatedCost: sql<number>`SUM(estimated_cost)`,
       credits: sql<number>`SUM(credits_used)`,
       avgDuration: sql<number>`CASE WHEN SUM(success_requests) > 0 THEN CAST(SUM(total_duration_ms) AS REAL) / SUM(success_requests) ELSE 0 END`,
     })

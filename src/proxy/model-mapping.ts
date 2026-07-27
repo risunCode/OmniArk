@@ -135,7 +135,6 @@ function isNativeProviderId(model: string): boolean {
   if (/^(claude|gpt|gemini)_/.test(model)) return true;
   // Explicit alias prefixes used by routed providers:
   if (model.startsWith("qd-")) return true;          // Qoder
-  if (model.startsWith("kiro:")) return true;        // Kiro Pro variant
   return false;
 }
 

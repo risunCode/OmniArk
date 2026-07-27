@@ -34,7 +34,7 @@ function tagBlockEphemeral(block: any): any {
 }
 
 /**
- * @param providerName provider routing name (e.g. "kiro", "kiro-pro", "codex").
+ * @param providerName provider routing name (e.g. "codex", "qoder", "byok:openrouter").
  *                     If providerOverrides[providerName] === false, we no-op.
  */
 export function applyCacheMarkers(

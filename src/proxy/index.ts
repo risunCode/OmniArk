@@ -16,8 +16,9 @@ import { prepareLogBody } from "./logging";
 import { resolveModelAlias } from "./model-mapping";
 import { eq, sql } from "drizzle-orm";
 import { providerList, refreshByokModels } from "./providers/registry";
+import { checkApiKeyPolicy, getApiKeyModelAllowlist, recordApiKeySuccess, type ApiKeyPrincipal } from "../api/keys";
 
-export const proxyRouter = new Hono();
+export const proxyRouter = new Hono<{ Variables: { apiKeyPrincipal: ApiKeyPrincipal } }>();
 
 const MAX_REQUEST_LOGS = 50;
 
@@ -29,6 +30,8 @@ async function upsertUsageSummary(entry: {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  cachedTokens: number;
+  estimatedCost: number;
   creditsUsed: number;
   durationMs: number;
 }) {
@@ -37,10 +40,10 @@ async function upsertUsageSummary(entry: {
     bucket.setMinutes(0, 0, 0); // truncate to hour
 
     await db.run(sql`
-      INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms)
+      INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, cached_tokens, estimated_cost, credits_used, total_duration_ms)
       VALUES (${bucket.toISOString()}, ${entry.provider || "unknown"}, ${entry.model || "unknown"}, 1,
         ${entry.status === "success" ? 1 : 0}, ${entry.status === "error" ? 1 : 0},
-        ${entry.promptTokens || 0}, ${entry.completionTokens || 0}, ${entry.totalTokens || 0},
+        ${entry.promptTokens || 0}, ${entry.completionTokens || 0}, ${entry.totalTokens || 0}, ${entry.cachedTokens || 0}, ${entry.estimatedCost || 0},
         ${entry.creditsUsed || 0}, ${entry.durationMs || 0})
       ON CONFLICT (bucket, provider, model) DO UPDATE SET
         total_requests = usage_summary.total_requests + excluded.total_requests,
@@ -49,6 +52,8 @@ async function upsertUsageSummary(entry: {
         prompt_tokens = usage_summary.prompt_tokens + excluded.prompt_tokens,
         completion_tokens = usage_summary.completion_tokens + excluded.completion_tokens,
         total_tokens = usage_summary.total_tokens + excluded.total_tokens,
+        cached_tokens = usage_summary.cached_tokens + excluded.cached_tokens,
+        estimated_cost = usage_summary.estimated_cost + excluded.estimated_cost,
         credits_used = usage_summary.credits_used + excluded.credits_used,
         total_duration_ms = usage_summary.total_duration_ms + excluded.total_duration_ms
     `);
@@ -83,6 +88,8 @@ export async function recordRequest(entry: NewRequestLog) {
       promptTokens: entry.promptTokens || 0,
       completionTokens: entry.completionTokens || 0,
       totalTokens: entry.totalTokens || 0,
+      cachedTokens: entry.cachedTokens || 0,
+      estimatedCost: entry.estimatedCost || 0,
       creditsUsed: entry.creditsUsed || 0,
       durationMs: entry.durationMs || 0,
     });
@@ -129,6 +136,10 @@ function computeCredits(
   };
 }
 
+function estimateCost(totalTokens: number, creditRate: number): number {
+  return Math.max(0, totalTokens) * Math.max(0, creditRate);
+}
+
 function extractUsageFromSsePayload(payload: string) {
   if (!payload || payload === "[DONE]") return null;
   try {
@@ -150,6 +161,7 @@ function extractUsageFromSsePayload(payload: string) {
       promptTokens: Number(usage?.prompt_tokens || usage?.input_tokens || 0),
       completionTokens: Number(usage?.completion_tokens || usage?.output_tokens || 0),
       totalTokens: Number(usage?.total_tokens || 0),
+      cachedTokens: Number(usage?.cached_tokens || usage?.cache_read_input_tokens || usage?.cacheReadInputTokens || 0),
       creditsUsed: Number(usage?.credits_used || usage?.creditsUsed || usage?.credit || parsed.credits_used || parsed.creditsUsed || 0),
     };
   } catch {
@@ -228,7 +240,7 @@ async function logProxyError(entry: NewRequestLog, label: string) {
     // Also track errors in usage_summary
     void upsertUsageSummary({
       provider: entry.provider || "unknown", model: entry.model || "unknown", status: "error",
-      promptTokens: 0, completionTokens: 0, totalTokens: 0, creditsUsed: 0, durationMs: entry.durationMs || 0,
+      promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, estimatedCost: 0, creditsUsed: 0, durationMs: entry.durationMs || 0,
     });
     if (++requestCounter % 10 === 0) void pruneRequestLogs();
   } catch (logError) {
@@ -252,6 +264,7 @@ function wrapStreamWithUsageFinalizer(
     fallbackCreditsUsed: number;
     fallbackCreditSource: CreditSource;
     useFreeCounter: boolean;
+    apiKeyPrincipal: ApiKeyPrincipal;
   }
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
@@ -261,6 +274,7 @@ function wrapStreamWithUsageFinalizer(
   let promptTokens = 0;
   let completionTokens = 0;
   let totalTokens = 0;
+  let cachedTokens = 0;
   let upstreamCredits = 0;
   let finalized = false;
   let streamError = false;
@@ -306,6 +320,7 @@ function wrapStreamWithUsageFinalizer(
       promptTokens = usage.promptTokens || promptTokens;
       completionTokens = usage.completionTokens || completionTokens;
       totalTokens = usage.totalTokens || totalTokens;
+      cachedTokens = usage.cachedTokens || cachedTokens;
       upstreamCredits = usage.creditsUsed || upstreamCredits;
     }
   };
@@ -317,6 +332,7 @@ function wrapStreamWithUsageFinalizer(
     const finalPromptTokens = promptTokens || context.fallbackPromptTokens;
     const finalCompletionTokens = completionTokens || estimateTokensFromText(streamedContent) || context.fallbackCompletionTokens;
     const finalTotalTokens = totalTokens || finalPromptTokens + finalCompletionTokens || context.fallbackTotalTokens;
+    const finalCachedTokens = cachedTokens;
     const { creditsUsed, creditSource } = computeCredits(
       context.provider,
       context.model,
@@ -325,6 +341,7 @@ function wrapStreamWithUsageFinalizer(
       upstreamCredits > 0 ? "upstream" : context.fallbackCreditSource
     );
     const durationMs = Math.max(0, Date.now() - context.startedAt);
+    const estimatedCost = estimateCost(finalTotalTokens, providers[context.provider].getProviderCreditRate(context.model));
 
     void (async () => {
       try {
@@ -377,12 +394,16 @@ function wrapStreamWithUsageFinalizer(
               promptTokens: finalPromptTokens,
               completionTokens: finalCompletionTokens,
               totalTokens: finalTotalTokens,
+              cachedTokens: finalCachedTokens,
+              estimatedCost,
               creditsUsed,
               durationMs,
               accountQuotaAfter: quotaAfter,
             })
             .where(eq(requestLogs.id, context.logId));
         }
+
+        await recordApiKeySuccess(context.apiKeyPrincipal, finalTotalTokens);
 
         broadcast({
           type: "request_log",
@@ -396,6 +417,8 @@ function wrapStreamWithUsageFinalizer(
             promptTokens: finalPromptTokens,
             completionTokens: finalCompletionTokens,
             totalTokens: finalTotalTokens,
+            cachedTokens: finalCachedTokens,
+            estimatedCost,
             creditsUsed,
             status: "success",
             durationMs,
@@ -418,7 +441,7 @@ function wrapStreamWithUsageFinalizer(
         void upsertUsageSummary({
           provider: context.provider, model: context.model, status: "success",
           promptTokens: finalPromptTokens, completionTokens: finalCompletionTokens,
-          totalTokens: finalTotalTokens, creditsUsed, durationMs,
+          totalTokens: finalTotalTokens, cachedTokens: finalCachedTokens, estimatedCost, creditsUsed, durationMs,
         });
         if (++requestCounter % 10 === 0) void pruneRequestLogs();
       } catch (error) {
@@ -462,7 +485,7 @@ function wrapStreamWithUsageFinalizer(
   });
 }
 
-async function handleChatCompletion(body: ChatCompletionRequest) {
+async function handleChatCompletion(body: ChatCompletionRequest, apiKeyPrincipal: ApiKeyPrincipal) {
   // Rewrite the incoming model id to its mapped target (CLI integration, e.g.
   // Claude Code's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };
@@ -474,6 +497,11 @@ async function handleChatCompletion(body: ChatCompletionRequest) {
     const promptTokens = result.promptTokens || result.response?.usage?.prompt_tokens || estimateMessagesTokens(body.messages);
     const completionTokens = result.completionTokens || result.response?.usage?.completion_tokens || 0;
     const totalTokens = result.tokensUsed || result.response?.usage?.total_tokens || promptTokens + completionTokens;
+    const responseUsage = result.response?.usage as {
+      cached_tokens?: number;
+      cache_read_input_tokens?: number;
+    } | undefined;
+    const cachedTokens = Number(responseUsage?.cached_tokens || responseUsage?.cache_read_input_tokens || 0);
 
   const { creditsUsed, creditSource } = computeCredits(
     provider,
@@ -482,6 +510,7 @@ async function handleChatCompletion(body: ChatCompletionRequest) {
     result.creditsUsed,
     result.creditSource
   );
+    const estimatedCost = estimateCost(totalTokens, providers[provider].getProviderCreditRate(body.model));
 
     // Qoder: server IS the source of truth, but we now also decrement the
     // local `freeRemaining` counter optimistically for free-bucket models
@@ -510,14 +539,17 @@ async function handleChatCompletion(body: ChatCompletionRequest) {
       }
     }
 
-  const logEntry = {
-    accountId: account.id,
+    const logEntry = {
+      accountId: account.id,
+      apiKeyId: apiKeyPrincipal.id,
     accountEmail: account.email,
     provider,
     model: body.model,
     promptTokens,
     completionTokens,
     totalTokens,
+    cachedTokens,
+    estimatedCost,
     creditsUsed,
     status: "success" as const,
     durationMs,
@@ -558,6 +590,7 @@ async function handleChatCompletion(body: ChatCompletionRequest) {
       fallbackCreditsUsed: creditsUsed,
       fallbackCreditSource: creditSource,
       useFreeCounter,
+      apiKeyPrincipal,
     });
 
       shouldReleaseTracking = false;
@@ -565,11 +598,12 @@ async function handleChatCompletion(body: ChatCompletionRequest) {
     }
 
   await db.insert(requestLogs).values(logEntry);
+  await recordApiKeySuccess(apiKeyPrincipal, totalTokens);
 
   // Upsert to usage_summary + periodic prune
   void upsertUsageSummary({
     provider, model: body.model, status: "success",
-    promptTokens, completionTokens, totalTokens, creditsUsed, durationMs,
+    promptTokens, completionTokens, totalTokens, cachedTokens, estimatedCost, creditsUsed, durationMs,
   });
   if (++requestCounter % 10 === 0) void pruneRequestLogs();
 
@@ -591,7 +625,11 @@ proxyRouter.get("/v1/models", async (c) => {
   // Ensure BYOK cache is fresh before listing models.
   // Without this, the sync getModels() returns stale/empty supportedModels.
   await refreshByokModels();
-  const models = getAllModels();
+  const principal = c.get("apiKeyPrincipal");
+  const violation = await checkApiKeyPolicy(principal);
+  if (violation) return c.json({ error: { message: violation.message, type: "auth_error" } }, violation.status);
+  const modelAllowlist = principal.policy ? getApiKeyModelAllowlist(principal.policy) : [];
+  const models = getAllModels().filter((model) => modelAllowlist.length === 0 || modelAllowlist.includes(model.id));
   return c.json({
     object: "list",
     data: models,
@@ -640,10 +678,15 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
   }
 
   body.model = normalizeModelId(body.model);
+  const principal = c.get("apiKeyPrincipal");
+  const violation = await checkApiKeyPolicy(principal, body.model);
+  if (violation) {
+    return c.json({ error: { message: violation.message, type: "insufficient_quota", code: "api_key_policy" } }, violation.status);
+  }
   const isStream = body.stream === true;
 
   try {
-    const { result } = await handleChatCompletion(body);
+    const { result } = await handleChatCompletion(body, principal);
 
     if (isStream && result.stream) {
       // Return SSE stream
@@ -720,10 +763,15 @@ proxyRouter.post("/v1/messages", async (c) => {
   }
 
   body.model = normalizeModelId(body.model);
+  const principal = c.get("apiKeyPrincipal");
+  const violation = await checkApiKeyPolicy(principal, body.model);
+  if (violation) {
+    return c.json({ type: "error", error: { type: "permission_error", message: violation.message } }, violation.status);
+  }
   const openAIRequest = anthropicToOpenAI(body);
 
   try {
-    const { result } = await handleChatCompletion(openAIRequest);
+    const { result } = await handleChatCompletion(openAIRequest, principal);
 
     if (body.stream === true && result.stream) {
       return new Response(openAIStreamToAnthropic(result.stream, body), {

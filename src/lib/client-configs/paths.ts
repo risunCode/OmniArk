@@ -1,6 +1,5 @@
 /**
  * Platform-aware config file paths for each supported AI client.
- * Adapted from kiro-unified frontend/src/main/lib/clientPaths.ts.
  */
 import * as path from "node:path";
 import * as os from "node:os";
